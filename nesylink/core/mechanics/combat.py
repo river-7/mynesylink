@@ -22,7 +22,7 @@ def update_monsters(engine: Any, result: Any) -> None:
             monster.last_move_delta_px = (0.0, 0.0)
             continue
         occupied_tiles.discard(monster.tile_pos)
-        update_monster(monster, runtime.player.position_px, runtime.room.walls, occupied_tiles)
+        update_monster(monster, runtime.player.position_px, runtime.room.runtime_blocking_tiles(), occupied_tiles)
         occupied_tiles.add(monster.tile_pos)
 
 
@@ -45,8 +45,8 @@ def update_monsters_grid(engine: Any) -> None:
         update_monster_grid(
             monster,
             player_tile,
-            runtime.room.walls,
-            runtime.room.blocking_tiles(),
+            runtime.room.runtime_blocking_tiles(),
+            runtime.room.runtime_blocking_tiles(),
             occupied_tiles,
             engine.rng,
         )
@@ -122,6 +122,7 @@ def remove_defeated_monster(engine: Any, monster: MonsterState, result: Any, *, 
         }
     )
     unlock_all_monster_defeated_exits(runtime, result)
+    reveal_chests_on_all_monsters_defeated(engine, from_room_id=runtime.room.room_id, result=result)
 
 
 def unlock_all_monster_defeated_exits(runtime: Any, result: Any) -> None:
@@ -146,6 +147,34 @@ def unlock_all_monster_defeated_exits(runtime: Any, result: Any) -> None:
         )
 
 
+def reveal_chests_on_all_monsters_defeated(engine: Any, *, from_room_id: str, result: Any) -> None:
+    runtime = engine.runtime
+    if runtime.room.monsters:
+        return
+    for coord in engine.room_manager.room_templates:
+        room = engine.room_manager.get_room(coord)
+        for chest in room.chests.values():
+            if chest.is_visible:
+                continue
+            reveal_on = chest.reveal_on or {}
+            if str(reveal_on.get("event", "")) != "all_monsters_defeated":
+                continue
+            trigger_room = reveal_on.get("room_id")
+            if trigger_room is not None and str(trigger_room) != from_room_id:
+                continue
+            chest.is_visible = True
+            result.events.append("chest_revealed")
+            result.event_details.append(
+                {
+                    "type": "chest_revealed",
+                    "chest_id": chest.chest_id,
+                    "room_id": room.room_id,
+                    "trigger": "all_monsters_defeated",
+                    "trigger_room_id": from_room_id,
+                }
+            )
+
+
 def apply_monster_knockback(engine: Any, monster: MonsterState) -> float:
     runtime = engine.runtime
     knockback_dx, knockback_dy = monster_knockback_vector(runtime, monster)
@@ -154,7 +183,7 @@ def apply_monster_knockback(engine: Any, monster: MonsterState) -> float:
         for other in runtime.room.monsters.values()
         if other.monster_id != monster.monster_id
     }
-    world_blockers = runtime.room.blocking_tiles() | other_monster_tiles
+    world_blockers = runtime.room.runtime_blocking_tiles() | other_monster_tiles
     previous_position = monster.position_px
     for distance in (float(MONSTER_HIT_KNOCKBACK_PX), 12.0, 8.0, 4.0):
         candidate_position = move_with_tile_collisions(
@@ -195,7 +224,7 @@ def apply_player_separation(runtime: Any, monster: MonsterState) -> None:
         runtime.player.position_px,
         runtime.player.size_px,
         (sep_dx, sep_dy),
-        runtime.room.blocking_tiles(),
+        runtime.room.runtime_blocking_tiles(),
     )
 
 

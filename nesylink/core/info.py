@@ -46,6 +46,12 @@ def build_info(
         "action_item": runtime.player.action_item,
         "action_pose": runtime.player.action_pose,
         "action_ticks_remaining": int(runtime.player.action_ticks_remaining),
+        "control_lock_steps_remaining": int(runtime.control_lock_steps_remaining),
+        "pending_respawn_tile": (
+            None
+            if runtime.pending_respawn_tile is None
+            else [int(runtime.pending_respawn_tile[0]), int(runtime.pending_respawn_tile[1])]
+        ),
     }
     game = {
         "dead": bool(runtime.player.health <= 0 or terminal_reason == "agent_dead"),
@@ -69,6 +75,7 @@ def build_info(
         "agent": _build_agent(runtime, player_tile, control_mode=control_mode),
         "inventory": inventory,
         "entities": entities,
+        "dynamic": _build_dynamic(runtime),
         "events": {
             "records": event_records,
             "flags": event_flags,
@@ -110,9 +117,13 @@ def _build_entities(
     entities: dict[str, Any] = {
         "monsters_remaining": len(runtime.room.monsters),
         "monster_ids": sorted(runtime.room.monsters),
-        "chests_remaining": sum(1 for chest in runtime.room.chests.values() if not chest.is_open),
+        "chests_remaining": sum(
+            1 for chest in runtime.room.chests.values() if chest.is_visible and not chest.is_open
+        ),
+        "chests_hidden": sum(1 for chest in runtime.room.chests.values() if not chest.is_visible),
         "traps_active": sum(1 for trap in runtime.room.traps.values() if trap.is_active),
         "buttons_pressed": sum(1 for button in runtime.room.buttons.values() if button.is_pressed),
+        "switches_total": len(runtime.room.switches),
         "exits_open": sum(1 for exit_cfg in runtime.room.exits if runtime.room.exit_state(exit_cfg).opened),
         "exits_total": len(runtime.room.exits),
     }
@@ -142,6 +153,35 @@ def _build_entities(
         }
     )
     return entities
+
+
+def _build_dynamic(runtime: RuntimeState) -> dict[str, Any]:
+    objects: dict[str, Any] = {}
+    for coord, room in runtime.room_manager.rooms.items():
+        del coord
+        for object_id, dynamic_object in room.dynamic_objects.items():
+            objects[object_id] = {
+                "kind": dynamic_object.kind,
+                "room_id": room.room_id,
+                "state": room.dynamic_states.get(object_id, dynamic_object.initial_state),
+            }
+    for template in runtime.room_manager.room_templates.values():
+        for dynamic_object in template.dynamic_objects:
+            if dynamic_object.object_id in objects:
+                continue
+            objects[dynamic_object.object_id] = {
+                "kind": dynamic_object.kind,
+                "room_id": template.room_id,
+                "state": dynamic_object.initial_state,
+            }
+    current_room_tiles = [
+        {"pos": [int(pos[0]), int(pos[1])], "tile": tile_kind}
+        for pos, tile_kind in sorted(runtime.room.dynamic_tiles.items())
+    ]
+    return {
+        "objects": objects,
+        "current_room_tiles": current_room_tiles,
+    }
 
 
 def _build_control(

@@ -21,6 +21,7 @@ from ..core.constants import (
 from ..core.mechanics.engine import DungeonEngine
 from ..core.info import build_info
 from ..core.observation import build_grid_observation, build_observation
+from ..core.observation import TILE_SWITCH
 from ..core.rendering import render_frame
 from ..core.state import tile_from_position_px
 from .registry import register_wrapper
@@ -105,7 +106,7 @@ def with_default_seed(env: gym.Env, seed: int) -> gym.Env:
 def build_observation_space(max_monster_slots: int, *, max_inventory: int = 2) -> spaces.Dict:
     return spaces.Dict(
         {
-            "grid": spaces.Box(low=0, high=8, shape=(GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8),
+            "grid": spaces.Box(low=0, high=TILE_SWITCH, shape=(GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8),
             "player_position_px": spaces.Box(
                 low=np.array([0.0, 0.0], dtype=np.float32),
                 high=np.array([MAP_PIXEL_WIDTH - 1.0, MAP_PIXEL_HEIGHT - 1.0], dtype=np.float32),
@@ -156,7 +157,7 @@ def build_observation_space(max_monster_slots: int, *, max_inventory: int = 2) -
 def build_grid_observation_space(max_monster_slots: int, *, max_inventory: int = 2) -> spaces.Dict:
     return spaces.Dict(
         {
-            "grid": spaces.Box(low=0, high=8, shape=(GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8),
+            "grid": spaces.Box(low=0, high=TILE_SWITCH, shape=(GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8),
             "player_tile": spaces.Box(
                 low=np.array([0, 0], dtype=np.int32),
                 high=np.array([GRID_WIDTH - 1, GRID_HEIGHT - 1], dtype=np.int32),
@@ -211,6 +212,7 @@ class BaseGameEnv(gym.Env):
         reward_fn: Any | None = None,
         max_steps: int | None = None,
         mission: str = "",
+        player_config: dict[str, Any] | None = None,
         map_id: str | None = None,
         **_: Any,
     ):
@@ -241,6 +243,7 @@ class BaseGameEnv(gym.Env):
             move_speed_px=move_speed_px,
             control_mode=self.control_mode,
             monster_move_periods=monster_move_periods,
+            player_config=player_config,
         )
         if map_id is not None:
             self.engine.map_id = str(map_id)
@@ -422,6 +425,7 @@ class DungeonEnv(BaseGameEnv):
         reward_fn: Any | None = None,
         max_steps: int | None = None,
         mission: str = "",
+        player_config: dict[str, Any] | None = None,
         map_id: str | None = None,
         **kwargs: Any,
     ):
@@ -439,6 +443,7 @@ class DungeonEnv(BaseGameEnv):
             reward_fn=reward_fn,
             max_steps=max_steps,
             mission=mission,
+            player_config=player_config,
             map_id=map_id,
             **kwargs,
         )
@@ -514,6 +519,7 @@ class GymDungeonEnv(DungeonEnv):
         reward_fn: Any | None = None,
         max_steps: int | None = None,
         mission: str = "",
+        player_config: dict[str, Any] | None = None,
         map_id: str | None = None,
         **kwargs: Any,
     ):
@@ -531,6 +537,7 @@ class GymDungeonEnv(DungeonEnv):
             reward_fn=reward_fn,
             max_steps=max_steps,
             mission=mission,
+            player_config=player_config,
             map_id=map_id,
             **kwargs,
         )

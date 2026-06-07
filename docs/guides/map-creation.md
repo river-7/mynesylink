@@ -62,6 +62,7 @@ Supported object kinds:
 - `monster`
 - `trap`
 - `button`
+- `switch`
 - `npc`
 
 Examples:
@@ -83,6 +84,124 @@ Examples:
   "monster_type": "chaser",
   "hp": 2,
   "damage": 1
+}
+```
+
+Traps support two runtime types. The default `spike` trap keeps the original
+behavior: stepping on it deals damage and immediately respawns the player at the
+room spawn named by `respawn_to`.
+
+```json
+{
+  "id": "spike_1",
+  "kind": "trap",
+  "trap_type": "spike",
+  "pos": [3, 4],
+  "damage": 1,
+  "respawn_to": "default"
+}
+```
+
+An `abyss` trap deals damage, locks player control for a short delay, then
+respawns the player on a safe adjacent tile. Safe tiles exclude walls, dynamic
+blocking tiles, and active traps.
+
+```json
+{
+  "id": "abyss_1",
+  "kind": "trap",
+  "trap_type": "abyss",
+  "pos": [4, 4],
+  "damage": 1,
+  "respawn_delay_steps": 2
+}
+```
+
+Large trap areas can be declared with `tiles` or `rects` on a `trap` object. The
+loader expands them into individual runtime traps:
+
+```json
+{
+  "id": "center_abyss",
+  "kind": "trap",
+  "trap_type": "abyss",
+  "damage": 1,
+  "respawn_delay_steps": 2,
+  "rects": [{"from": [0, 0], "to": [9, 7]}]
+}
+```
+
+Switches are reusable map-dynamics triggers. They do not declare rewards or task
+success conditions. In the first dynamic-map version, switches support
+`activation: "interact"` and a `cycle_state` effect:
+
+```json
+{
+  "id": "west_switch",
+  "kind": "switch",
+  "pos": [1, 5],
+  "activation": "interact",
+  "effect": {
+    "type": "cycle_state",
+    "target": "center_bridge",
+    "order": ["west_to_east", "west_to_north", "west_to_south"]
+  }
+}
+```
+
+## Dynamic Objects
+
+Rooms may declare `dynamic_objects`. Dynamic objects patch the runtime map from
+their current state without changing the static `layout`. `gap` is not passable;
+`bridge` is passable. The first supported dynamic object kind is
+`rotating_bridge`:
+
+```json
+{
+  "dynamic_objects": [
+    {
+      "id": "center_bridge",
+      "kind": "rotating_bridge",
+      "initial_state": "west_to_east",
+      "background_tile": "gap",
+      "active_tile": "bridge",
+      "states": {
+        "west_to_east": {"tiles": [[2, 4], [3, 4], [4, 4]]},
+        "west_to_north": {"tiles": [[2, 4], [3, 4], [3, 3]]}
+      }
+    }
+  ]
+}
+```
+
+Dynamic object ids are dungeon-wide ids so switches can target objects in other
+rooms. Rewards should inspect observations and `info["dynamic"]` rather than
+adding task-specific fields to map JSON.
+
+Use `"background_tile": "none"` when inactive dynamic-object tiles should reveal
+the room's normal objects, such as abyss traps under an inactive bridge path.
+
+Chests can be hidden until a generic environment event reveals them:
+
+```json
+{
+  "id": "final_chest",
+  "kind": "chest",
+  "pos": [4, 4],
+  "hidden": true,
+  "reveal_on": {"event": "all_monsters_defeated", "room_id": "south"},
+  "loot": {"kind": "gold", "amount": 1}
+}
+```
+
+Item loot may also grant and equip a tool:
+
+```json
+{
+  "kind": "item",
+  "item_id": "sword",
+  "tool": "sword",
+  "equip_slot": "A"
 }
 ```
 

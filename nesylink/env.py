@@ -27,6 +27,7 @@ class EnvConfig:
     max_monsters: int | None
     max_inventory: int
     mission: str
+    player_config: dict[str, Any]
     gym_id: str | None
     task_id: str | None
 
@@ -85,6 +86,7 @@ def make_env(
         max_monsters=config.max_monsters,
         max_inventory=config.max_inventory,
         mission=config.mission,
+        player_config=config.player_config,
         map_id=config.map_id,
         **kwargs,
     )
@@ -145,6 +147,7 @@ def _resolve_env_config(
         max_monsters=_override(max_monsters, task.max_monsters if task is not None else None),
         max_inventory=_override(max_inventory, task.max_inventory if task is not None else 2),
         mission=_override(mission, task.mission if task is not None else ""),
+        player_config=dict(task.player_config if task is not None else {}),
         gym_id=task.gym_id if task is not None else None,
         task_id=task.task_id if task is not None else None,
     )

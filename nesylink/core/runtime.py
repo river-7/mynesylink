@@ -20,6 +20,8 @@ class RuntimeState:
     last_message: str = MESSAGE_DEFAULT
     no_progress_steps: int = 0
     seed: int | None = None
+    control_lock_steps_remaining: int = 0
+    pending_respawn_tile: tuple[int, int] | None = None
 
     def snapshot(self) -> RuntimeSnapshot:
         return RuntimeSnapshot(

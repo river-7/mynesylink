@@ -20,6 +20,7 @@ class DungeonEngine:
         move_speed_px: float = PLAYER_SPEED_PX_PER_TICK,
         control_mode: str = "pixel",
         monster_move_periods: dict[str, int] | None = None,
+        player_config: dict | None = None,
     ):
         self.room_manager = RoomManager(room_file)
         self.map_id = self.room_manager.room_file.stem
@@ -31,6 +32,8 @@ class DungeonEngine:
             str(monster_type): max(1, int(period))
             for monster_type, period in (monster_move_periods or {}).items()
         }
+        self.player_config = dict(getattr(self.room_manager, "player_config", {}))
+        self.player_config.update(dict(player_config or {}))
         self.max_monster_slots = max(1, self.room_manager.max_monsters)
         self.world_completion_via_exit = any(
             exit_cfg.complete_task
@@ -63,6 +66,10 @@ class DungeonEngine:
             progress_start_room_id=runtime.room.room_id,
         )
         runtime.step_count += 1
+        if runtime.control_lock_steps_remaining > 0:
+            self._advance_control_lock(result)
+            result.last_message = runtime.last_message
+            return result
         action_started_this_step = False
 
         self._advance_player_action_state()
@@ -120,6 +127,11 @@ class DungeonEngine:
             progress_start_pos=runtime.player.position_px,
             progress_start_room_id=runtime.room.room_id,
         )
+        if runtime.control_lock_steps_remaining > 0:
+            runtime.step_count += 1
+            self._advance_control_lock(result)
+            result.last_message = runtime.last_message
+            return result
         action_started_this_step = False
 
         self._advance_player_action_state()
@@ -192,6 +204,7 @@ class DungeonEngine:
         room_coord = self.room_manager.start_room
         room = self.room_manager.get_room(room_coord)
         player = PlayerState(position_px=tile_to_top_left_px(room.spawns[room.default_spawn_name]))
+        self._apply_player_config(player)
         return RuntimeState(
             room_manager=self.room_manager,
             room_coord=room_coord,
@@ -205,10 +218,54 @@ class DungeonEngine:
             seed=self.seed,
         )
 
+    def _apply_player_config(self, player: PlayerState) -> None:
+        if "items" in self.player_config:
+            player.items = [str(item) for item in self.player_config.get("items", [])]
+        if "tools" in self.player_config:
+            player.tools = [str(tool) for tool in self.player_config.get("tools", [])]
+        if "equipped" in self.player_config:
+            player.equipped = {
+                str(slot): str(tool)
+                for slot, tool in dict(self.player_config.get("equipped", {})).items()
+            }
+        player.action_a_label = player.equipped_tool_label(EquipmentSlot.A.value).upper()
+        player.action_b_label = player.equipped_tool_label(EquipmentSlot.B.value).upper()
+
     def _advance_player_action_state(self) -> None:
         player = self.runtime.player
         if player.action_ticks_remaining > 1:
             player.action_ticks_remaining -= 1
+
+    def _advance_control_lock(self, result: EngineStepResult) -> None:
+        runtime = self.runtime
+        runtime.control_lock_steps_remaining -= 1
+        if runtime.control_lock_steps_remaining > 0:
+            runtime.last_message = "FALLING"
+            result.events.append("control_locked")
+            result.event_details.append(
+                {
+                    "type": "control_locked",
+                    "remaining_steps": runtime.control_lock_steps_remaining,
+                    "reason": "abyss_fall",
+                }
+            )
+            return
+
+        if runtime.pending_respawn_tile is not None:
+            respawn_tile = runtime.pending_respawn_tile
+            runtime.player.position_px = tile_to_top_left_px(respawn_tile)
+            runtime.pending_respawn_tile = None
+            runtime.last_message = "RESPAWN"
+            result.events.append("abyss_respawned")
+            result.event_details.append(
+                {
+                    "type": "abyss_respawned",
+                    "respawn_tile": [respawn_tile[0], respawn_tile[1]],
+                }
+            )
+            return
+
+        runtime.last_message = "READY"
 
     def _finalize_player_action_state(self, action_started_this_step: bool) -> None:
         player = self.runtime.player

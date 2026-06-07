@@ -10,8 +10,14 @@ from .schema import (
     OPPOSITE_EXIT_DIRECTIONS,
     SUPPORTED_EXIT_DIRECTIONS,
     SUPPORTED_EXIT_TYPES,
+    SUPPORTED_DYNAMIC_OBJECT_KINDS,
+    SUPPORTED_DYNAMIC_TILE_KINDS,
     SUPPORTED_OBJECT_KINDS,
     SUPPORTED_REQUIREMENT_KEYS,
+    SUPPORTED_SWITCH_ACTIVATIONS,
+    SUPPORTED_SWITCH_EFFECT_TYPES,
+    DynamicObjectConfig,
+    DynamicObjectStateConfig,
     ExitConfig,
     ExitRuntimeState,
     MapValidationError,
@@ -35,8 +41,14 @@ __all__ = [
     "OPPOSITE_EXIT_DIRECTIONS",
     "SUPPORTED_EXIT_DIRECTIONS",
     "SUPPORTED_EXIT_TYPES",
+    "SUPPORTED_DYNAMIC_OBJECT_KINDS",
+    "SUPPORTED_DYNAMIC_TILE_KINDS",
     "SUPPORTED_OBJECT_KINDS",
     "SUPPORTED_REQUIREMENT_KEYS",
+    "SUPPORTED_SWITCH_ACTIVATIONS",
+    "SUPPORTED_SWITCH_EFFECT_TYPES",
+    "DynamicObjectConfig",
+    "DynamicObjectStateConfig",
     "ExitConfig",
     "ExitRuntimeState",
     "MapValidationError",
@@ -58,6 +70,8 @@ class RoomManager:
         self.room_templates: dict[tuple[int, int], RoomTemplate] = {}
         self.room_ids: dict[str, tuple[int, int]] = {}
         self.rooms: dict[tuple[int, int], RoomState] = {}
+        self.dynamic_object_rooms: dict[str, tuple[int, int]] = {}
+        self.player_config: dict = {}
         self.max_monsters = 0
         self.start_room = (0, 0)
         self.start_room_id = ""
@@ -72,6 +86,12 @@ class RoomManager:
         schema_version = raw.get("schema_version")
         if schema_version != 1:
             raise MapValidationError(self.room_file, "schema_version", "only schema_version=1 is supported")
+        raw_player_config = raw.get("player_config", {})
+        if raw_player_config is None:
+            raw_player_config = {}
+        if not isinstance(raw_player_config, dict):
+            raise MapValidationError(self.room_file, "player_config", "must be an object")
+        self.player_config = dict(raw_player_config)
 
         room_files = raw.get("room_files", [])
         if not isinstance(room_files, list) or not room_files:
@@ -99,25 +119,70 @@ class RoomManager:
             raise MapValidationError(self.room_file, "start_room", "must be a room id string")
 
         validate_exit_targets(self.room_file, self.room_templates, self.room_ids)
+        self._validate_switch_targets()
 
     def _load_standalone_room(self, raw: dict) -> None:
         room_payload = dict(raw)
         room_payload.setdefault("coord", [0, 0])
+        raw_player_config = room_payload.get("player_config", {})
+        if raw_player_config is None:
+            raw_player_config = {}
+        if not isinstance(raw_player_config, dict):
+            raise MapValidationError(self.room_file, "player_config", "must be an object")
+        self.player_config = dict(raw_player_config)
         template = build_room_template(self.room_file, room_payload)
         self._register_template(template, self.room_file)
         self.start_room_id = template.room_id
         self.start_room = template.coord
         validate_exit_targets(self.room_file, self.room_templates, self.room_ids)
+        self._validate_switch_targets()
 
     def _register_template(self, template: RoomTemplate, room_path: Path) -> None:
         if template.coord in self.room_templates:
             raise MapValidationError(room_path, "coord", f"duplicate room coordinate {template.coord}")
         if template.room_id in self.room_ids:
             raise MapValidationError(room_path, "id", f"duplicate room id '{template.room_id}'")
+        for dynamic_object in template.dynamic_objects:
+            if dynamic_object.object_id in self.dynamic_object_rooms:
+                raise MapValidationError(
+                    room_path,
+                    "dynamic_objects",
+                    f"duplicate dynamic object id '{dynamic_object.object_id}'",
+                )
         self.room_templates[template.coord] = template
         self.room_ids[template.room_id] = template.coord
+        for dynamic_object in template.dynamic_objects:
+            self.dynamic_object_rooms[dynamic_object.object_id] = template.coord
         monster_count = sum(1 for entry in template.objects if entry.kind == "monster")
         self.max_monsters = max(self.max_monsters, monster_count)
+
+    def _validate_switch_targets(self) -> None:
+        for template in self.room_templates.values():
+            for object_index, entry in enumerate(template.objects):
+                if entry.kind != "switch":
+                    continue
+                effect = entry.payload.get("effect", {})
+                target = str(effect.get("target", ""))
+                if target not in self.dynamic_object_rooms:
+                    raise MapValidationError(
+                        self.room_file,
+                        f"rooms[{template.room_id}].objects[{object_index}].effect.target",
+                        f"unknown dynamic object '{target}'",
+                    )
+                target_template = self.room_templates[self.dynamic_object_rooms[target]]
+                dynamic_object = next(
+                    obj for obj in target_template.dynamic_objects if obj.object_id == target
+                )
+                missing_states = [state for state in effect.get("order", []) if state not in dynamic_object.states]
+                if missing_states:
+                    raise MapValidationError(
+                        self.room_file,
+                        f"rooms[{template.room_id}].objects[{object_index}].effect.order",
+                        (
+                            f"unknown states for dynamic object '{target}': "
+                            f"{', '.join(missing_states)}"
+                        ),
+                    )
 
     def template_by_room_id(self, room_id: str) -> RoomTemplate:
         coord = self.room_ids[room_id]
@@ -129,6 +194,8 @@ class RoomManager:
         npcs: dict[str, NPCState] = {}
         traps: dict[str, TrapState] = {}
         buttons: dict[str, ButtonState] = {}
+        switches: dict[str, ButtonState] = {}
+        switch_effects: dict[str, dict] = {}
         monsters: dict[str, MonsterState] = {}
         exit_states = {
             exit_config.exit_id: ExitRuntimeState(
@@ -144,6 +211,8 @@ class RoomManager:
                     chest_id=entry.object_id,
                     pos=entry.pos,
                     loot=dict(entry.payload.get("loot", {})),
+                    is_visible=not bool(entry.payload.get("hidden", False)),
+                    reveal_on=dict(entry.payload.get("reveal_on", {})),
                 )
             elif entry.kind == "npc":
                 npcs[entry.object_id] = NPCState(
@@ -152,11 +221,20 @@ class RoomManager:
                     text=str(entry.payload.get("text", "...")),
                 )
             elif entry.kind == "trap":
+                trap_type = str(entry.payload.get("trap_type", entry.payload.get("type", "spike"))).lower()
+                if trap_type not in {"spike", "abyss"}:
+                    raise MapValidationError(
+                        self.room_file,
+                        f"rooms[{template.room_id}].objects.{entry.object_id}.trap_type",
+                        f"unsupported trap_type '{trap_type}', allowed: abyss, spike",
+                    )
                 traps[entry.object_id] = TrapState(
                     trap_id=entry.object_id,
                     pos=entry.pos,
+                    trap_type=trap_type,
                     damage=max(1, int(entry.payload.get("damage", 1))),
                     respawn_to=str(entry.payload.get("respawn_to", template.default_spawn_name)),
+                    respawn_delay_steps=max(0, int(entry.payload.get("respawn_delay_steps", 0))),
                     single_use=bool(entry.payload.get("single_use", False)),
                 )
             elif entry.kind == "button":
@@ -165,6 +243,13 @@ class RoomManager:
                     pos=entry.pos,
                     message=str(entry.payload.get("message", "BUTTON")),
                 )
+            elif entry.kind == "switch":
+                switches[entry.object_id] = ButtonState(
+                    button_id=entry.object_id,
+                    pos=entry.pos,
+                    message=str(entry.payload.get("message", "SWITCH")),
+                )
+                switch_effects[entry.object_id] = dict(entry.payload.get("effect", {}))
             elif entry.kind == "monster":
                 monster_data = {
                     "id": entry.object_id,
@@ -173,7 +258,15 @@ class RoomManager:
                 }
                 monsters[entry.object_id] = build_monster_from_dict(monster_data)
 
-        return RoomState(
+        dynamic_objects = {
+            dynamic_object.object_id: dynamic_object
+            for dynamic_object in template.dynamic_objects
+        }
+        dynamic_states = {
+            dynamic_object.object_id: dynamic_object.initial_state
+            for dynamic_object in template.dynamic_objects
+        }
+        room = RoomState(
             room_id=template.room_id,
             coord=template.coord,
             width=template.width,
@@ -185,10 +278,16 @@ class RoomManager:
             npcs=npcs,
             traps=traps,
             buttons=buttons,
+            switches=switches,
             monsters=monsters,
             exits=list(template.exits),
+            switch_effects=switch_effects,
+            dynamic_objects=dynamic_objects,
+            dynamic_states=dynamic_states,
             exit_states=exit_states,
         )
+        room.rebuild_dynamic_tiles()
+        return room
 
     def get_room(self, coord: tuple[int, int]) -> RoomState:
         if coord not in self.rooms:
@@ -201,6 +300,12 @@ class RoomManager:
 
     def coord_for_room_id(self, room_id: str) -> tuple[int, int]:
         return self.room_ids[room_id]
+
+    def coord_for_dynamic_object(self, object_id: str) -> tuple[int, int]:
+        return self.dynamic_object_rooms[object_id]
+
+    def room_for_dynamic_object(self, object_id: str) -> RoomState:
+        return self.get_room(self.coord_for_dynamic_object(object_id))
 
     def reset_room_cache(self) -> None:
         self.rooms = {}

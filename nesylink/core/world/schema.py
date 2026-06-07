@@ -14,12 +14,17 @@ SUPPORTED_OBJECT_KINDS = {
     "chest",
     "monster",
     "npc",
+    "switch",
     "trap",
 }
 
 SUPPORTED_EXIT_DIRECTIONS = {"north", "south", "west", "east"}
 SUPPORTED_EXIT_TYPES = {"normal", "locked_key", "conditional"}
 SUPPORTED_REQUIREMENT_KEYS = {"key_count", "consume_key", "button_pressed", "item", "all_monsters_defeated"}
+SUPPORTED_DYNAMIC_OBJECT_KINDS = {"rotating_bridge"}
+SUPPORTED_DYNAMIC_TILE_KINDS = {"none", "gap", "bridge"}
+SUPPORTED_SWITCH_ACTIVATIONS = {"interact"}
+SUPPORTED_SWITCH_EFFECT_TYPES = {"cycle_state"}
 LAYOUT_TILES = {"#", "."}
 
 EXIT_DIRECTION_TILES: dict[str, tuple[GridPos, GridPos]] = {
@@ -94,6 +99,28 @@ class ObjectConfig:
 
 
 @dataclass(frozen=True)
+class DynamicObjectStateConfig:
+    state_id: str
+    tiles: tuple[GridPos, ...]
+
+
+@dataclass(frozen=True)
+class DynamicObjectConfig:
+    object_id: str
+    kind: str
+    initial_state: str
+    states: dict[str, DynamicObjectStateConfig]
+    background_tile: str = "gap"
+    active_tile: str = "bridge"
+
+    def all_tiles(self) -> set[GridPos]:
+        tiles: set[GridPos] = set()
+        for state in self.states.values():
+            tiles.update(state.tiles)
+        return tiles
+
+
+@dataclass(frozen=True)
 class ExitConfig:
     exit_id: str
     direction: str
@@ -127,6 +154,7 @@ class RoomTemplate:
     walls: frozenset[GridPos]
     objects: tuple[ObjectConfig, ...]
     exits: tuple[ExitConfig, ...]
+    dynamic_objects: tuple[DynamicObjectConfig, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -142,13 +170,18 @@ class RoomState:
     npcs: dict[str, NPCState]
     traps: dict[str, TrapState]
     buttons: dict[str, ButtonState]
+    switches: dict[str, ButtonState]
     monsters: dict[str, MonsterState]
     exits: list[ExitConfig]
+    switch_effects: dict[str, dict[str, Any]] = field(default_factory=dict)
+    dynamic_objects: dict[str, DynamicObjectConfig] = field(default_factory=dict)
+    dynamic_states: dict[str, str] = field(default_factory=dict)
+    dynamic_tiles: dict[GridPos, str] = field(default_factory=dict)
     exit_states: dict[str, ExitRuntimeState] = field(default_factory=dict)
 
     def chest_at(self, pos: GridPos) -> ChestState | None:
         for chest in self.chests.values():
-            if chest.pos == pos:
+            if chest.is_visible and chest.pos == pos:
                 return chest
         return None
 
@@ -159,6 +192,8 @@ class RoomState:
         return None
 
     def trap_at(self, pos: GridPos) -> TrapState | None:
+        if self.dynamic_tiles.get(pos) == "bridge":
+            return None
         for trap in self.traps.values():
             if trap.pos == pos and trap.is_active:
                 return trap
@@ -168,6 +203,12 @@ class RoomState:
         for button in self.buttons.values():
             if button.pos == pos:
                 return button
+        return None
+
+    def switch_at(self, pos: GridPos) -> ButtonState | None:
+        for switch in self.switches.values():
+            if switch.pos == pos:
+                return switch
         return None
 
     def exit_at(self, pos: GridPos, direction: str) -> ExitConfig | None:
@@ -186,6 +227,35 @@ class RoomState:
 
     def blocking_tiles(self) -> set[GridPos]:
         tiles = set(self.walls)
-        tiles.update(chest.pos for chest in self.chests.values())
+        tiles.update(chest.pos for chest in self.chests.values() if chest.is_visible)
         tiles.update(npc.pos for npc in self.npcs.values())
         return tiles
+
+    def dynamic_blocking_tiles(self) -> set[GridPos]:
+        return {pos for pos, tile_kind in self.dynamic_tiles.items() if tile_kind == "gap"}
+
+    def runtime_blocking_tiles(self) -> set[GridPos]:
+        return self.blocking_tiles() | self.dynamic_blocking_tiles()
+
+    def rebuild_dynamic_tiles(self) -> None:
+        tiles: dict[GridPos, str] = {}
+        for dynamic_object in self.dynamic_objects.values():
+            for tile in dynamic_object.all_tiles():
+                if dynamic_object.background_tile == "none":
+                    tiles.pop(tile, None)
+                else:
+                    tiles[tile] = dynamic_object.background_tile
+            active_state = self.dynamic_states.get(dynamic_object.object_id, dynamic_object.initial_state)
+            state_config = dynamic_object.states[active_state]
+            for tile in state_config.tiles:
+                tiles[tile] = dynamic_object.active_tile
+        self.dynamic_tiles = tiles
+
+    def set_dynamic_state(self, object_id: str, state_id: str) -> tuple[str, str]:
+        dynamic_object = self.dynamic_objects[object_id]
+        if state_id not in dynamic_object.states:
+            raise ValueError(f"unknown state '{state_id}' for dynamic object '{object_id}'")
+        old_state = self.dynamic_states.get(object_id, dynamic_object.initial_state)
+        self.dynamic_states[object_id] = state_id
+        self.rebuild_dynamic_tiles()
+        return old_state, state_id

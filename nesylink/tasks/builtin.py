@@ -65,6 +65,25 @@ BUILTIN_TASKS = (
         monster_move_periods=EASY_GRID_MONSTER_PERIODS,
         mission="Travel west, collect the key, return, and unlock the right door with tile-level controls.",
     ),
+    TaskSpec(
+        task_id="task_4",
+        gym_id="task_4",
+        map_id="task_4",
+        max_steps=1000,
+        control_mode="grid",
+        observation_mode="grid",
+        monster_move_periods=EASY_GRID_MONSTER_PERIODS,
+        max_monsters=1,
+        mission=(
+            "Rotate the bridge to collect the key, unlock the sword room, "
+            "defeat the monster, and open the revealed center chest."
+        ),
+        player_config={
+            "items": ["shield"],
+            "tools": ["shield"],
+            "equipped": {"A": "none", "B": "shield"},
+        },
+    ),
 )
 
 

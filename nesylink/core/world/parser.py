@@ -9,8 +9,14 @@ from .schema import (
     LAYOUT_TILES,
     SUPPORTED_EXIT_DIRECTIONS,
     SUPPORTED_EXIT_TYPES,
+    SUPPORTED_DYNAMIC_OBJECT_KINDS,
+    SUPPORTED_DYNAMIC_TILE_KINDS,
     SUPPORTED_OBJECT_KINDS,
     SUPPORTED_REQUIREMENT_KEYS,
+    SUPPORTED_SWITCH_ACTIVATIONS,
+    SUPPORTED_SWITCH_EFFECT_TYPES,
+    DynamicObjectConfig,
+    DynamicObjectStateConfig,
     ExitConfig,
     GridPos,
     MapValidationError,
@@ -69,6 +75,11 @@ def build_room_template(room_path: Path, payload: dict[str, Any]) -> RoomTemplat
     objects = _build_objects(raw_objects, wall_set, room_path)
     object_kinds = {entry.object_id: entry.kind for entry in objects}
 
+    raw_dynamic_objects = payload.get("dynamic_objects", [])
+    if not isinstance(raw_dynamic_objects, list):
+        raise MapValidationError(room_path, "dynamic_objects", "must be a list")
+    dynamic_objects = _build_dynamic_objects(raw_dynamic_objects, wall_set, room_path)
+
     raw_exits = payload.get("exits", [])
     if not isinstance(raw_exits, list):
         raise MapValidationError(room_path, "exits", "must be a list")
@@ -84,6 +95,7 @@ def build_room_template(room_path: Path, payload: dict[str, Any]) -> RoomTemplat
         walls=wall_set,
         objects=tuple(objects),
         exits=tuple(exits),
+        dynamic_objects=tuple(dynamic_objects),
     )
 
 
@@ -113,6 +125,27 @@ def _build_objects(
                 f"unsupported object kind '{kind}', allowed: {allowed}",
             )
 
+        if kind == "trap" and ("tiles" in entry or "rects" in entry):
+            expanded_tiles = _expand_trap_tiles(entry, f"objects[{index}]", room_path)
+            payload = dict(entry)
+            payload.pop("id", None)
+            payload.pop("kind", None)
+            payload.pop("pos", None)
+            payload.pop("tiles", None)
+            payload.pop("rects", None)
+            for tile_index, pos in enumerate(expanded_tiles, start=1):
+                _validate_floor_position(pos, wall_tiles, f"objects[{index}].tiles[{tile_index - 1}]", room_path)
+                generated_id = f"{object_id}_{tile_index}"
+                if generated_id in seen_ids:
+                    raise MapValidationError(
+                        room_path,
+                        f"objects[{index}].id",
+                        f"duplicate generated object id '{generated_id}'",
+                    )
+                seen_ids.add(generated_id)
+                objects.append(ObjectConfig(object_id=generated_id, kind=kind, pos=pos, payload=dict(payload)))
+            continue
+
         pos = _require_grid_coord(entry.get("pos"), f"objects[{index}].pos", room_path)
         _validate_floor_position(pos, wall_tiles, f"objects[{index}].pos", room_path)
 
@@ -120,9 +153,204 @@ def _build_objects(
         payload.pop("id", None)
         payload.pop("kind", None)
         payload.pop("pos", None)
+        if kind == "switch":
+            payload = _validate_switch_payload(payload, f"objects[{index}]", room_path)
         objects.append(ObjectConfig(object_id=object_id, kind=kind, pos=pos, payload=payload))
 
     return objects
+
+
+def _expand_trap_tiles(entry: dict[str, Any], field_path: str, room_path: Path) -> list[GridPos]:
+    tiles: list[GridPos] = []
+    seen: set[GridPos] = set()
+
+    raw_tiles = entry.get("tiles", [])
+    if raw_tiles is not None:
+        if not isinstance(raw_tiles, list):
+            raise MapValidationError(room_path, f"{field_path}.tiles", "must be a list")
+        for tile_index, raw_tile in enumerate(raw_tiles):
+            tile = _require_grid_coord(raw_tile, f"{field_path}.tiles[{tile_index}]", room_path)
+            if tile not in seen:
+                tiles.append(tile)
+                seen.add(tile)
+
+    raw_rects = entry.get("rects", [])
+    if raw_rects is not None:
+        if not isinstance(raw_rects, list):
+            raise MapValidationError(room_path, f"{field_path}.rects", "must be a list")
+        for rect_index, raw_rect in enumerate(raw_rects):
+            if not isinstance(raw_rect, dict):
+                raise MapValidationError(room_path, f"{field_path}.rects[{rect_index}]", "must be an object")
+            start = _require_grid_coord(raw_rect.get("from"), f"{field_path}.rects[{rect_index}].from", room_path)
+            end = _require_grid_coord(raw_rect.get("to"), f"{field_path}.rects[{rect_index}].to", room_path)
+            min_x, max_x = sorted((start[0], end[0]))
+            min_y, max_y = sorted((start[1], end[1]))
+            for y in range(min_y, max_y + 1):
+                for x in range(min_x, max_x + 1):
+                    tile = (x, y)
+                    if tile not in seen:
+                        tiles.append(tile)
+                        seen.add(tile)
+
+    if not tiles:
+        raise MapValidationError(room_path, field_path, "trap tile expansion must produce at least one tile")
+    return tiles
+
+
+def _validate_switch_payload(payload: dict[str, Any], field_path: str, room_path: Path) -> dict[str, Any]:
+    activation = str(payload.get("activation", "interact")).lower()
+    if activation not in SUPPORTED_SWITCH_ACTIVATIONS:
+        allowed = ", ".join(sorted(SUPPORTED_SWITCH_ACTIVATIONS))
+        raise MapValidationError(
+            room_path,
+            f"{field_path}.activation",
+            f"unsupported switch activation '{activation}', allowed: {allowed}",
+        )
+
+    raw_effect = payload.get("effect")
+    if not isinstance(raw_effect, dict):
+        raise MapValidationError(room_path, f"{field_path}.effect", "must be an object")
+    effect_type = str(raw_effect.get("type", "")).lower()
+    if effect_type not in SUPPORTED_SWITCH_EFFECT_TYPES:
+        allowed = ", ".join(sorted(SUPPORTED_SWITCH_EFFECT_TYPES))
+        raise MapValidationError(
+            room_path,
+            f"{field_path}.effect.type",
+            f"unsupported switch effect '{effect_type}', allowed: {allowed}",
+        )
+    target = _require_string(raw_effect.get("target"), f"{field_path}.effect.target", room_path)
+    raw_order = raw_effect.get("order")
+    if not isinstance(raw_order, list) or not raw_order:
+        raise MapValidationError(room_path, f"{field_path}.effect.order", "must be a non-empty list")
+    order: list[str] = []
+    for order_index, value in enumerate(raw_order):
+        order.append(_require_string(value, f"{field_path}.effect.order[{order_index}]", room_path))
+    if len(set(order)) != len(order):
+        raise MapValidationError(room_path, f"{field_path}.effect.order", "must not contain duplicate states")
+
+    return {
+        **payload,
+        "activation": activation,
+        "effect": {
+            **raw_effect,
+            "type": effect_type,
+            "target": target,
+            "order": order,
+        },
+    }
+
+
+def _build_dynamic_objects(
+    raw_dynamic_objects: list[dict[str, Any]],
+    wall_tiles: frozenset[GridPos],
+    room_path: Path,
+) -> list[DynamicObjectConfig]:
+    seen_ids: set[str] = set()
+    dynamic_objects: list[DynamicObjectConfig] = []
+
+    for index, entry in enumerate(raw_dynamic_objects):
+        if not isinstance(entry, dict):
+            raise MapValidationError(room_path, f"dynamic_objects[{index}]", "must be an object")
+
+        object_id = _require_string(entry.get("id"), f"dynamic_objects[{index}].id", room_path)
+        if object_id in seen_ids:
+            raise MapValidationError(
+                room_path,
+                f"dynamic_objects[{index}].id",
+                f"duplicate dynamic object id '{object_id}'",
+            )
+        seen_ids.add(object_id)
+
+        kind = _require_string(entry.get("kind"), f"dynamic_objects[{index}].kind", room_path)
+        if kind not in SUPPORTED_DYNAMIC_OBJECT_KINDS:
+            allowed = ", ".join(sorted(SUPPORTED_DYNAMIC_OBJECT_KINDS))
+            raise MapValidationError(
+                room_path,
+                f"dynamic_objects[{index}].kind",
+                f"unsupported dynamic object kind '{kind}', allowed: {allowed}",
+            )
+
+        background_tile = str(entry.get("background_tile", "gap")).lower()
+        active_tile = str(entry.get("active_tile", "bridge")).lower()
+        for field_name, tile_kind in (
+            ("background_tile", background_tile),
+            ("active_tile", active_tile),
+        ):
+            if tile_kind not in SUPPORTED_DYNAMIC_TILE_KINDS:
+                allowed = ", ".join(sorted(SUPPORTED_DYNAMIC_TILE_KINDS))
+                raise MapValidationError(
+                    room_path,
+                    f"dynamic_objects[{index}].{field_name}",
+                    f"unsupported dynamic tile '{tile_kind}', allowed: {allowed}",
+                )
+
+        raw_states = entry.get("states")
+        if not isinstance(raw_states, dict) or not raw_states:
+            raise MapValidationError(room_path, f"dynamic_objects[{index}].states", "must be a non-empty object")
+        states: dict[str, DynamicObjectStateConfig] = {}
+        for state_id, raw_state in raw_states.items():
+            if not isinstance(state_id, str) or not state_id.strip():
+                raise MapValidationError(
+                    room_path,
+                    f"dynamic_objects[{index}].states",
+                    "state ids must be non-empty strings",
+                )
+            if not isinstance(raw_state, dict):
+                raise MapValidationError(
+                    room_path,
+                    f"dynamic_objects[{index}].states.{state_id}",
+                    "must be an object",
+                )
+            raw_tiles = raw_state.get("tiles")
+            if not isinstance(raw_tiles, list) or not raw_tiles:
+                raise MapValidationError(
+                    room_path,
+                    f"dynamic_objects[{index}].states.{state_id}.tiles",
+                    "must be a non-empty list",
+                )
+            tiles: list[GridPos] = []
+            seen_tiles: set[GridPos] = set()
+            for tile_index, raw_tile in enumerate(raw_tiles):
+                tile = _require_grid_coord(
+                    raw_tile,
+                    f"dynamic_objects[{index}].states.{state_id}.tiles[{tile_index}]",
+                    room_path,
+                )
+                if tile in wall_tiles:
+                    raise MapValidationError(
+                        room_path,
+                        f"dynamic_objects[{index}].states.{state_id}.tiles[{tile_index}]",
+                        "dynamic object tile overlaps a wall tile",
+                    )
+                if tile not in seen_tiles:
+                    tiles.append(tile)
+                    seen_tiles.add(tile)
+            states[state_id] = DynamicObjectStateConfig(state_id=state_id, tiles=tuple(tiles))
+
+        initial_state = _require_string(
+            entry.get("initial_state"),
+            f"dynamic_objects[{index}].initial_state",
+            room_path,
+        )
+        if initial_state not in states:
+            raise MapValidationError(
+                room_path,
+                f"dynamic_objects[{index}].initial_state",
+                f"unknown state '{initial_state}'",
+            )
+
+        dynamic_objects.append(
+            DynamicObjectConfig(
+                object_id=object_id,
+                kind=kind,
+                initial_state=initial_state,
+                states=states,
+                background_tile=background_tile,
+                active_tile=active_tile,
+            )
+        )
+
+    return dynamic_objects
 
 
 def _build_exits(

@@ -16,6 +16,9 @@ TILE_EXIT = 5
 TILE_TRAP = 6
 TILE_BUTTON = 7
 TILE_NPC = 8
+TILE_GAP = 9
+TILE_BRIDGE = 10
+TILE_SWITCH = 11
 
 
 def room_observation(room: RoomState, player: PlayerState) -> np.ndarray:
@@ -25,7 +28,7 @@ def room_observation(room: RoomState, player: PlayerState) -> np.ndarray:
         observation[row, col] = TILE_WALL
 
     for chest in room.chests.values():
-        if not chest.is_open:
+        if chest.is_visible and not chest.is_open:
             observation[chest.pos[1], chest.pos[0]] = TILE_CHEST
 
     for npc in room.npcs.values():
@@ -35,8 +38,17 @@ def room_observation(room: RoomState, player: PlayerState) -> np.ndarray:
         if trap.is_active:
             observation[trap.pos[1], trap.pos[0]] = TILE_TRAP
 
+    for (col, row), tile_kind in room.dynamic_tiles.items():
+        if tile_kind == "gap":
+            observation[row, col] = TILE_GAP
+        elif tile_kind == "bridge":
+            observation[row, col] = TILE_BRIDGE
+
     for button in room.buttons.values():
         observation[button.pos[1], button.pos[0]] = TILE_BUTTON
+
+    for switch in room.switches.values():
+        observation[switch.pos[1], switch.pos[0]] = TILE_SWITCH
 
     for exit_config in room.exits:
         for tile in exit_config.tiles:

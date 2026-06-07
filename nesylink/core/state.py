@@ -97,6 +97,8 @@ class ChestState:
     pos: GridPos
     loot: dict[str, Any]
     is_open: bool = False
+    is_visible: bool = True
+    reveal_on: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -110,8 +112,10 @@ class NPCState:
 class TrapState:
     trap_id: str
     pos: GridPos
+    trap_type: str = "spike"
     damage: int = 1
     respawn_to: str = "default"
+    respawn_delay_steps: int = 0
     single_use: bool = False
     is_active: bool = True
 

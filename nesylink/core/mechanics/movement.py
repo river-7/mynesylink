@@ -36,7 +36,7 @@ def handle_move(engine: Any, direction: str, result: Any) -> None:
             current_position,
             runtime.player.size_px,
             (step_dx, step_dy),
-            runtime.room.blocking_tiles(),
+            runtime.room.runtime_blocking_tiles(),
         )
         if next_position == current_position:
             blocked_position = proposed_position
@@ -77,7 +77,7 @@ def handle_grid_move(engine: Any, direction: str, result: Any) -> None:
     current_tile = tile_from_position_px(runtime.player.position_px, runtime.player.size_px)
     target_tile = (current_tile[0] + dx, current_tile[1] + dy)
 
-    blocked_reason = grid_blocked_reason(target_tile, runtime.room.blocking_tiles())
+    blocked_reason = grid_blocked_reason(target_tile, runtime.room.runtime_blocking_tiles())
     if blocked_reason is not None:
         runtime.last_message = "EDGE BLOCKED" if blocked_reason == "bounds" else "BLOCKED"
         result.events.append("action_blocked")

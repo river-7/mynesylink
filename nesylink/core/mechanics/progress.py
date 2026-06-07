@@ -21,7 +21,10 @@ def step_made_progress(
         "agent_healed",
         "monster_killed",
         "chest_opened",
+        "chest_revealed",
         "button_pressed",
+        "switch_activated",
+        "dynamic_object_state_changed",
         "room_changed",
         "exit_reached",
         "talked_npc",
@@ -36,6 +39,8 @@ def all_chests_opened(room_manager: Any) -> bool:
         room = room_manager.get_room(coord)
         for chest in room.chests.values():
             total_chests += 1
+            if not chest.is_visible:
+                return False
             if not chest.is_open:
                 return False
     return total_chests > 0

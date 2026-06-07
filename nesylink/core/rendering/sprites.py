@@ -39,8 +39,17 @@ SPIKE_BASE_EDGE = (24, 52, 138)
 SPIKE_METAL = (238, 238, 236)
 SPIKE_SHADE = (112, 112, 126)
 SPIKE_HIGHLIGHT = (255, 255, 255)
+ABYSS_DARK = (8, 8, 16)
+ABYSS_MID = (24, 28, 72)
+ABYSS_EDGE = (58, 56, 86)
 BUTTON_UP = (40, 190, 74)
 BUTTON_DOWN = (28, 112, 52)
+SWITCH_BODY = (255, 216, 80)
+SWITCH_DOWN = (184, 124, 42)
+GAP_DARK = (16, 22, 48)
+GAP_MID = (24, 52, 138)
+BRIDGE_WOOD = (172, 104, 48)
+BRIDGE_EDGE = (96, 48, 26)
 EXIT_GLOW = (255, 244, 112)
 DOOR_WOOD = (96, 48, 26)
 CONDITIONAL_GLYPH = (255, 216, 80)
@@ -327,6 +336,25 @@ def draw_wall(frame: np.ndarray, col: int, row: int) -> None:
     fill_rect(frame, (left + 4, top + 3, 8, 1), HIGHLIGHT)
 
 
+def draw_gap(frame: np.ndarray, col: int, row: int) -> None:
+    left, top, _, _ = tile_rect(col, row)
+    fill_rect(frame, (left, top, TILE_SIZE, TILE_SIZE), GAP_DARK)
+    draw_rect_outline(frame, (left, top, TILE_SIZE, TILE_SIZE), OUTLINE)
+    fill_rect(frame, (left + 3, top + 3, TILE_SIZE - 6, TILE_SIZE - 6), GAP_MID)
+    fill_rect(frame, (left + 5, top + 5, TILE_SIZE - 10, TILE_SIZE - 10), GAP_DARK)
+
+
+def draw_bridge(frame: np.ndarray, col: int, row: int) -> None:
+    left, top, _, _ = tile_rect(col, row)
+    fill_rect(frame, (left, top, TILE_SIZE, TILE_SIZE), BRIDGE_WOOD)
+    draw_rect_outline(frame, (left, top, TILE_SIZE, TILE_SIZE), OUTLINE)
+    fill_rect(frame, (left + 1, top + 3, TILE_SIZE - 2, 2), BRIDGE_EDGE)
+    fill_rect(frame, (left + 1, top + 8, TILE_SIZE - 2, 2), BRIDGE_EDGE)
+    fill_rect(frame, (left + 1, top + 13, TILE_SIZE - 2, 2), BRIDGE_EDGE)
+    fill_rect(frame, (left + 4, top + 1, 2, TILE_SIZE - 2), HIGHLIGHT)
+    fill_rect(frame, (left + 10, top + 1, 2, TILE_SIZE - 2), BRIDGE_EDGE)
+
+
 def draw_room_frame(frame: np.ndarray, map_bottom: int) -> None:
     width = frame.shape[1]
     fill_rect(frame, (0, 0, width, 4), WALL_LIGHT)
@@ -498,6 +526,11 @@ def draw_trap(frame: np.ndarray, col: int, row: int) -> None:
         fill_rect(frame, (left + spike_left + 1, top + 8, 1, 1), SPIKE_HIGHLIGHT)
 
 
+def draw_abyss(frame: np.ndarray, col: int, row: int) -> None:
+    left, top, _, _ = tile_rect(col, row)
+    fill_rect(frame, (left, top, TILE_SIZE, TILE_SIZE), (0, 0, 0))
+
+
 def draw_button(frame: np.ndarray, col: int, row: int, *, pressed: bool) -> None:
     left, top, _, _ = tile_rect(col, row)
     fill_rect(frame, (left + 3, top + 9, 10, 4), OUTLINE)
@@ -508,6 +541,16 @@ def draw_button(frame: np.ndarray, col: int, row: int, *, pressed: bool) -> None
         fill_rect(frame, (left + 4, top + 5, 8, 6), BUTTON_UP)
         fill_rect(frame, (left + 5, top + 5, 6, 1), HIGHLIGHT)
     draw_rect_outline(frame, (left + 4, top + (7 if pressed else 5), 8, 4 if pressed else 6), OUTLINE)
+
+
+def draw_switch(frame: np.ndarray, col: int, row: int, *, activated: bool) -> None:
+    left, top, _, _ = tile_rect(col, row)
+    fill_rect(frame, (left + 2, top + 10, 12, 3), OUTLINE)
+    fill_rect(frame, (left + 3, top + 8, 10, 3), SWITCH_DOWN if activated else SWITCH_BODY)
+    fill_rect(frame, (left + 7, top + 3, 2, 6), OUTLINE)
+    fill_rect(frame, (left + 6, top + 2, 4, 3), SWITCH_BODY)
+    fill_rect(frame, (left + 7, top + 2, 2, 1), HIGHLIGHT)
+    draw_rect_outline(frame, (left + 6, top + 2, 4, 3), OUTLINE)
 
 
 def draw_npc(frame: np.ndarray, col: int, row: int, color: Color) -> None:
@@ -617,7 +660,7 @@ def draw_item_bracket(frame: np.ndarray, left: int, top: int, width: int, height
 def draw_tool_icon(frame: np.ndarray, left: int, top: int, tool_name: str) -> None:
     if tool_name == "shield":
         draw_shield_icon(frame, left - 1, top - 1)
-    else:
+    elif tool_name == "sword":
         draw_sword_icon(frame, left + 2, top - 3)
 
 

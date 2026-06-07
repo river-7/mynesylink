@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,7 @@ class TaskSpec:
     max_monsters: int | None = None
     max_inventory: int = 2
     mission: str = ""
+    player_config: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.task_id.strip():
@@ -56,3 +57,4 @@ class TaskSpec:
                 }
             ),
         )
+        object.__setattr__(self, "player_config", MappingProxyType(dict(self.player_config)))
