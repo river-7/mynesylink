@@ -45,15 +45,15 @@ targets = {
 python submissions/vision_benchmark.py --steps 200
 ```
 
-最新本地结果：
+最新本地结果，统计 seeds 0-4、每个 seed 200 steps 的平均值：
 
 | Task | 静态格准确率 | 玩家精确率 | 玩家平均距离 | 怪物精确率 | 怪物平均距离 |
 |---|---:|---:|---:|---:|---:|
-| task_1 | 0.9980 | 0.8458 | 0.154 | 1.0000 | 0.000 |
-| task_2 | 0.9929 | 0.8209 | 0.179 | 0.6269 | 0.383 |
-| task_3 | 0.9977 | 0.8209 | 0.179 | 1.0000 | 0.000 |
-| task_4 | 0.9977 | 0.8159 | 0.184 | 1.0000 | 0.000 |
-| task_5 | 0.9971 | 0.8209 | 0.179 | 0.9552 | 0.045 |
+| task_1 | 0.9990 | 0.9164 | 0.083 | 1.0000 | 0.000 |
+| task_2 | 0.9960 | 0.9134 | 0.086 | 0.7762 | 0.230 |
+| task_3 | 0.9989 | 0.9134 | 0.086 | 1.0000 | 0.000 |
+| task_4 | 0.9989 | 0.9164 | 0.083 | 1.0000 | 0.000 |
+| task_5 | 0.9983 | 0.9134 | 0.086 | 0.9552 | 0.045 |
 
 解释：静态地形和可交互物体已经比较稳定。玩家和怪物的精确率较低，主要是因为像素级移动时，环境 debug grid 使用实体中心点，而精灵图在视觉上可能跨在两个格子之间。Planner/Executor 应该在 tile center 附近重新规划，或者把动态实体位置视作近似的一格障碍。
 
@@ -88,13 +88,13 @@ python utils/evaluate_policy.py --policy submissions/vision_policy.py --tasks ma
 ```text
 mathematical_logic/task_1
 success_rate: 1.000
-avg_steps:    277.0
-avg_reward:   127.180
+avg_steps:    293.0
+avg_reward:   126.720
 
 mathematical_logic/task_2
 success_rate: 1.000
-avg_steps:    171.0
-avg_reward:   128.290
+avg_steps:    175.0
+avg_reward:   128.250
 
 mathematical_logic/task_3
 success_rate: 1.000
@@ -105,8 +105,8 @@ key_collected: 1.000
 
 mathematical_logic/task_4
 success_rate: 1.000
-avg_steps:    1110.0
-avg_reward:   250.900
+avg_steps:    1152.0
+avg_reward:   250.080
 switch_activated: 1.000
 key_collected: 1.000
 door_opened: 1.000
