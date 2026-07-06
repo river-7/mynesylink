@@ -70,7 +70,7 @@ Day 2:
 
 - Run benchmark on several seeds and export JSON/CSV.
 - Integrate with B's planner via `VisionState`.
-- Extend the same frame-only memory approach toward Task5 after checking its button, trap, drain, key-door, and healing structure.
+- Continue Task5 cleanup after the current key-door-heal-gold route: west-room chest, remaining combat, and final all-chests completion.
 - Write final report subsection: perception assumptions, no-`info` guarantee, known limitations, benchmark table.
 - Do a final check that submitted policy does not read `info` except for allowed inventory if the evaluator explicitly exposes it.
 
@@ -80,6 +80,7 @@ Day 2:
 python utils/evaluate_policy.py --policy submissions/vision_policy.py --tasks mathematical_logic/task_1 mathematical_logic/task_2 --num-envs 3 --max-steps 1200
 python utils/evaluate_policy.py --policy submissions/vision_policy.py --tasks mathematical_logic/task_3 --num-envs 3 --max-steps 1500
 python utils/evaluate_policy.py --policy submissions/vision_policy.py --tasks mathematical_logic/task_4 --num-envs 3 --max-steps 2600
+python utils/evaluate_policy.py --policy submissions/vision_policy.py --tasks mathematical_logic/task_5 --num-envs 1 --max-steps 2000
 ```
 
 Result:
@@ -111,6 +112,19 @@ key_collected: 1.000
 door_opened: 1.000
 item_collected: 1.000
 monster_killed: 1.000
+
+mathematical_logic/task_5
+success_rate: 0.000
+avg_steps:    1000.0
+avg_reward:   40.400
+chest_opened: 1.000
+button_pressed: 1.000
+key_collected: 1.000
+door_opened: 1.000
+agent_healed: 1.000
+gold_collected: 1.000
+monster_killed: 1.000
+trap_triggered: 0.000
 ```
 
-The policy still remains an A-side integration harness rather than the final team planner, but it now covers the README-constrained frame-only path through Tasks 1-4.
+The policy still remains an A-side integration harness rather than the final team planner, but it now covers the README-constrained frame-only path through Tasks 1-4 and reaches Task5's button-key-door-heal-gold chain with one monster kill for partial credit.

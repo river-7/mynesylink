@@ -61,7 +61,13 @@ def outward_action(edge_tile: GridPos) -> int:
     return ACTION_NOOP
 
 
-def bfs(symbol_map: SymbolMap, goals: Iterable[GridPos], *, avoid_danger: bool = True) -> GoalPlan | None:
+def bfs(
+    symbol_map: SymbolMap,
+    goals: Iterable[GridPos],
+    *,
+    avoid_danger: bool = True,
+    extra_danger: Iterable[GridPos] = (),
+) -> GoalPlan | None:
     if symbol_map.player is None:
         return None
     goal_set = set(goals)
@@ -71,6 +77,7 @@ def bfs(symbol_map: SymbolMap, goals: Iterable[GridPos], *, avoid_danger: bool =
     start = symbol_map.player
     blocked = symbol_map.blocked_tiles()
     danger = symbol_map.danger_tiles() if avoid_danger else set()
+    danger |= set(extra_danger)
     queue: deque[GridPos] = deque([start])
     parent: dict[GridPos, GridPos | None] = {start: None}
 
@@ -145,6 +152,7 @@ class Policy:
         self.task5_west_done = False
         self.task5_has_key = False
         self.task5_east_done = False
+        self.task5_start_gold_done = False
 
     def reset(self, seed: int | None = None, task_id: str | None = None) -> None:
         del seed
@@ -170,6 +178,7 @@ class Policy:
         self.task5_west_done = False
         self.task5_has_key = False
         self.task5_east_done = False
+        self.task5_start_gold_done = False
 
     def act(self, obs, info=None) -> int:
         del info
@@ -177,12 +186,18 @@ class Policy:
         symbol_map = self.vision.observe(normalized.frame, reward=normalized.reward)
         if symbol_map.player is None:
             return ACTION_NOOP
+        if self.last_player_cell is not None and manhattan(symbol_map.player, self.last_player_cell) > 3:
+            self.move_ticks_remaining = 0
+            self.move_action = ACTION_NOOP
+            self.exit_pushes = 0
         if symbol_map.player == self.last_player_cell:
             self.same_cell_ticks += 1
         else:
             self.same_cell_ticks = 0
         self.last_player_cell = symbol_map.player
         self.known_exits.update(symbol_map.exits)
+        if self.attack_cooldown > 0:
+            self.attack_cooldown -= 1
 
         if self._is_exit_phase() and self._player_is_on_exit(symbol_map):
             self.move_ticks_remaining = 0
@@ -218,7 +233,15 @@ class Policy:
     def _urgent_interaction(self, symbol_map: SymbolMap) -> int | None:
         if symbol_map.player is None:
             return None
-        if self.task_id.endswith("task_2") and symbol_map.monsters:
+        task5_west_fight = (
+            self.task_id.endswith("task_5")
+            and symbol_map.monsters
+            and (
+                (self._is_task5_start_room(symbol_map) and self.task5_east_done)
+                or self.phase == "task5_west"
+            )
+        )
+        if (self.task_id.endswith("task_2") or task5_west_fight) and symbol_map.monsters:
             monster = min(symbol_map.monsters, key=lambda pos: manhattan(symbol_map.player, pos))
             if manhattan(symbol_map.player, monster) <= 1:
                 if self.attack_cooldown <= 0:
@@ -402,13 +425,43 @@ class Policy:
                     return ACTION_A
                 self.attack_cooldown -= 1
                 return self._face_target(symbol_map.player, monster)  # type: ignore[arg-type]
-            if not in_start_room:
-                monster = min(symbol_map.monsters, key=lambda pos: manhattan(symbol_map.player, pos))  # type: ignore[arg-type]
-                return self._move_toward_any(
-                    symbol_map,
-                    adjacent_passable(symbol_map, monster, avoid_danger=False),
-                    avoid_danger=False,
-                )
+            if (in_start_room and self.task5_east_done) or (self.phase == "task5_west"):
+                return self._engage_nearest_monster(symbol_map)
+
+        if self.interaction_cooldown > 0:
+            self.interaction_cooldown -= 1
+            return ACTION_NOOP
+
+        if in_start_room:
+            if symbol_map.buttons and not self.task5_button_pressed:
+                button = min(symbol_map.buttons, key=lambda pos: manhattan(symbol_map.player, pos))  # type: ignore[arg-type]
+                if symbol_map.player == button:
+                    self.task5_button_pressed = True
+                    self.interaction_cooldown = 8
+                    return ACTION_NOOP
+                return self._move_toward_any(symbol_map, {button})
+            if not self.task5_has_key:
+                self.phase = "task5_south"
+                return self._go_to_direction_exit(symbol_map, "south")
+            if not self.task5_east_done:
+                self.phase = "task5_east"
+                return self._go_to_direction_exit(symbol_map, "east")
+            if not self.task5_start_gold_done:
+                visible_chests = self._unopened_chests(symbol_map)
+                if visible_chests:
+                    self.phase = "task5_start_gold"
+                    chest = min(visible_chests, key=lambda pos: manhattan(symbol_map.player, pos))  # type: ignore[arg-type]
+                    if manhattan(symbol_map.player, chest) <= 1:  # type: ignore[arg-type]
+                        self.opened_chests.add(chest)
+                        self.task5_start_gold_done = True
+                        self.interaction_cooldown = 8
+                        return ACTION_A
+                    return self._move_toward_any(symbol_map, adjacent_passable(symbol_map, chest))
+                self.task5_start_gold_done = True
+            if not self.task5_west_done:
+                self.phase = "task5_west"
+                return self._go_to_direction_exit(symbol_map, "west")
+            self.phase = "task5_cleanup"
 
         visible_chests = self._unopened_chests(symbol_map)
         if visible_chests:
@@ -423,33 +476,25 @@ class Policy:
                     self.task5_east_done = True
                 self.interaction_cooldown = 8
                 return ACTION_A
-            return self._move_toward_any(symbol_map, adjacent_passable(symbol_map, chest))
-
-        if self.interaction_cooldown > 0:
-            self.interaction_cooldown -= 1
-            return ACTION_NOOP
-
-        if in_start_room and symbol_map.buttons and not self.task5_button_pressed:
-            button = min(symbol_map.buttons, key=lambda pos: manhattan(symbol_map.player, pos))  # type: ignore[arg-type]
-            if manhattan(symbol_map.player, button) <= 1:  # type: ignore[arg-type]
-                self.task5_button_pressed = True
-                self.interaction_cooldown = 8
-                return ACTION_A
-            return self._move_toward_any(symbol_map, adjacent_passable(symbol_map, button))
-
-        if in_start_room:
-            if not self.task5_has_key:
-                self.phase = "task5_south"
-                return self._go_to_direction_exit(symbol_map, "south")
-            if not self.task5_east_done:
-                self.phase = "task5_east"
-                return self._go_to_direction_exit(symbol_map, "east")
-            if not self.task5_west_done:
-                self.phase = "task5_west"
-                return self._go_to_direction_exit(symbol_map, "west")
-            return ACTION_NOOP
+            return self._move_toward_any(
+                symbol_map,
+                adjacent_passable(symbol_map, chest),
+                extra_danger=self._monster_zones(symbol_map) if self.phase == "task5_west" else (),
+            )
 
         return self._go_to_current_room_exit(symbol_map)
+
+    def _engage_nearest_monster(self, symbol_map: SymbolMap) -> int:
+        if symbol_map.player is None or not symbol_map.monsters:
+            return ACTION_NOOP
+        monster = min(symbol_map.monsters, key=lambda pos: manhattan(symbol_map.player, pos))
+        return self._move_toward_any(symbol_map, adjacent_passable(symbol_map, monster), avoid_danger=False)
+
+    def _monster_zones(self, symbol_map: SymbolMap) -> set[GridPos]:
+        zones = set(symbol_map.monsters)
+        for monster in symbol_map.monsters:
+            zones.update(pos for pos in neighbors(monster) if symbol_map.in_bounds(pos))
+        return zones
 
     def _is_task5_start_room(self, symbol_map: SymbolMap) -> bool:
         return len(symbol_map.exits) >= 5
@@ -463,7 +508,14 @@ class Policy:
         self.exit_pushes = 0
         return self._move_toward_any(symbol_map, self.known_exits or set(symbol_map.exits))
 
-    def _go_to_direction_exit(self, symbol_map: SymbolMap, direction: str) -> int:
+    def _go_to_direction_exit(
+        self,
+        symbol_map: SymbolMap,
+        direction: str,
+        *,
+        avoid_danger: bool = True,
+        extra_danger: Iterable[GridPos] = (),
+    ) -> int:
         exits = self._direction_exits(symbol_map, direction)
         if symbol_map.player in exits:
             if self.exit_pushes < 24:
@@ -471,17 +523,50 @@ class Policy:
                 return outward_action(symbol_map.player)
             return ACTION_NOOP
         self.exit_pushes = 0
-        return self._move_toward_any(symbol_map, exits)
+        return self._move_toward_any(symbol_map, exits, avoid_danger=avoid_danger, extra_danger=extra_danger)
 
     def _go_to_current_room_exit(self, symbol_map: SymbolMap) -> int:
         exits = set(symbol_map.exits)
-        if symbol_map.player in exits:
+        if not exits and symbol_map.player is not None:
+            x, y = symbol_map.player
+            if x in (0, 9) or y in (0, 7):
+                if self.exit_pushes < 24:
+                    self.exit_pushes += 1
+                    return outward_action(symbol_map.player)
+                return ACTION_NOOP
+        if symbol_map.player in exits or self._player_is_on_visible_exit_segment(symbol_map, exits):
             if self.exit_pushes < 24:
                 self.exit_pushes += 1
                 return outward_action(symbol_map.player)
             return ACTION_NOOP
         self.exit_pushes = 0
         return self._move_toward_any(symbol_map, exits)
+
+    def _player_is_on_visible_exit_segment(self, symbol_map: SymbolMap, exits: set[GridPos]) -> bool:
+        if symbol_map.player is None or not exits:
+            return False
+        x, y = symbol_map.player
+        if x not in (0, 9) and y not in (0, 7):
+            return False
+        exit_xs = [pos[0] for pos in exits]
+        exit_ys = [pos[1] for pos in exits]
+        if y == 0 and any(exit_y == 0 for exit_y in exit_ys):
+            top_xs = [pos[0] for pos in exits if pos[1] == 0]
+            margin = 1 if len(top_xs) == 1 else 0
+            return min(top_xs) - margin <= x <= max(top_xs) + margin
+        if y == 7 and any(exit_y == 7 for exit_y in exit_ys):
+            bottom_xs = [pos[0] for pos in exits if pos[1] == 7]
+            margin = 1 if len(bottom_xs) == 1 else 0
+            return min(bottom_xs) - margin <= x <= max(bottom_xs) + margin
+        if x == 0 and any(exit_x == 0 for exit_x in exit_xs):
+            left_ys = [pos[1] for pos in exits if pos[0] == 0]
+            margin = 1 if len(left_ys) == 1 else 0
+            return min(left_ys) - margin <= y <= max(left_ys) + margin
+        if x == 9 and any(exit_x == 9 for exit_x in exit_xs):
+            right_ys = [pos[1] for pos in exits if pos[0] == 9]
+            margin = 1 if len(right_ys) == 1 else 0
+            return min(right_ys) - margin <= y <= max(right_ys) + margin
+        return False
 
     def _diagonal_to_cardinal_step(self, symbol_map: SymbolMap, target: GridPos) -> int | None:
         if symbol_map.player is None:
@@ -543,8 +628,9 @@ class Policy:
         goals: Iterable[GridPos],
         *,
         avoid_danger: bool = True,
+        extra_danger: Iterable[GridPos] = (),
     ) -> int:
-        plan = bfs(symbol_map, goals, avoid_danger=avoid_danger)
+        plan = bfs(symbol_map, goals, avoid_danger=avoid_danger, extra_danger=extra_danger)
         if plan is None or len(plan.path) < 2:
             return ACTION_NOOP
         action = action_between(plan.path[0], plan.path[1])
