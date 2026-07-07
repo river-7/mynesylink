@@ -20,6 +20,9 @@ def gridHeight : Nat := 8
 structure SymbolMap where
   cellAt : Coord → Cell
 
+/-- Sprint Day 2 name for the symbolic room map abstraction. -/
+abbrev Map := SymbolMap
+
 /-- Tile coordinates inside the playable room. -/
 def InBounds (p : Coord) : Prop :=
   p.x < gridWidth ∧ p.y < gridHeight
@@ -66,6 +69,24 @@ def isMoveAction : Action → Prop
   | Action.moveRight => True
   | _ => False
 
+/-- Tile-level moves, separated from non-movement button actions. -/
+inductive Move where
+  | up
+  | down
+  | left
+  | right
+  deriving BEq, Repr
+
+instance : ToString Move where
+  toString := reprStr
+
+/-- Embed a tile move into the public environment action type. -/
+def Move.toAction : Move → Action
+  | Move.up => Action.moveUp
+  | Move.down => Action.moveDown
+  | Move.left => Action.moveLeft
+  | Move.right => Action.moveRight
+
 /-- Candidate coordinate after one tile move. Boundary underflow stays put. -/
 def nextCoord (p : Coord) : Action → Coord
   | Action.moveUp => { p with y := p.y - 1 }
@@ -73,6 +94,17 @@ def nextCoord (p : Coord) : Action → Coord
   | Action.moveLeft => { p with x := p.x - 1 }
   | Action.moveRight => { p with x := p.x + 1 }
   | _ => p
+
+/-- Candidate coordinate for the movement-only API. -/
+def nextCoordByMove (p : Coord) : Move → Coord
+  | Move.up => { p with y := p.y - 1 }
+  | Move.down => { p with y := p.y + 1 }
+  | Move.left => { p with x := p.x - 1 }
+  | Move.right => { p with x := p.x + 1 }
+
+/-- A movement command is allowed exactly when its target tile is safe. -/
+def MoveAllowedByMove (m : Map) (player : Coord) (mv : Move) : Prop :=
+  SafeTile m (nextCoordByMove player mv)
 
 /-- The action-mask contract: only safe movement actions are allowed. -/
 def MoveAllowed (m : SymbolMap) (player : Coord) (a : Action) : Prop :=
@@ -86,6 +118,25 @@ place.  Later files can refine this into a full game state transition.
 noncomputable def nextPlayer (m : SymbolMap) (player : Coord) (a : Action) : Coord := by
   classical
   exact if _h : MoveAllowed m player a then nextCoord player a else player
+
+/-- Sprint Day 2 `next_state` interface for the tile-level player position. -/
+noncomputable def next_state (m : Map) (player : Coord) (a : Action) : Coord :=
+  nextPlayer m player a
+
+theorem nextCoordByMove_eq_nextCoord
+    (player : Coord) (mv : Move) :
+    nextCoordByMove player mv = nextCoord player mv.toAction := by
+  cases mv <;> rfl
+
+theorem moveAllowedByMove_toAction
+    {m : Map} {player : Coord} {mv : Move}
+    (h : MoveAllowedByMove m player mv) :
+    MoveAllowed m player mv.toAction := by
+  constructor
+  · cases mv <;> simp [Move.toAction, isMoveAction]
+  · unfold MoveAllowedByMove at h
+    rw [← nextCoordByMove_eq_nextCoord]
+    exact h
 
 theorem safeTile_inBounds
     {m : SymbolMap} {p : Coord}
@@ -149,6 +200,20 @@ theorem nextPlayer_eq_self_of_not_allowed
   unfold nextPlayer
   simp [h]
 
+theorem next_state_eq_nextCoord_of_allowed
+    {m : Map} {player : Coord} {a : Action}
+    (h : MoveAllowed m player a) :
+    next_state m player a = nextCoord player a := by
+  unfold next_state
+  exact nextPlayer_eq_nextCoord_of_allowed h
+
+theorem next_state_eq_self_of_not_allowed
+    {m : Map} {player : Coord} {a : Action}
+    (h : ¬ MoveAllowed m player a) :
+    next_state m player a = player := by
+  unfold next_state
+  exact nextPlayer_eq_self_of_not_allowed h
+
 theorem allowed_move_preserves_safe_state
     {m : SymbolMap} {player : Coord} {a : Action}
     (h : MoveAllowed m player a) :
@@ -173,6 +238,31 @@ theorem allowed_move_does_not_enter_danger
     (h : MoveAllowed m player a) :
     ¬ Dangerous m (nextPlayer m player a) := by
   exact safeTile_not_dangerous (allowed_move_preserves_safe_state h)
+
+theorem allowed_move_preserves_next_state
+    {m : Map} {player : Coord} {a : Action}
+    (h : MoveAllowed m player a) :
+    SafeState m (next_state m player a) := by
+  unfold next_state
+  exact allowed_move_preserves_safe_state h
+
+theorem allowed_move_next_state_inBounds
+    {m : Map} {player : Coord} {a : Action}
+    (h : MoveAllowed m player a) :
+    InBounds (next_state m player a) := by
+  exact safeTile_inBounds (allowed_move_preserves_next_state h)
+
+theorem allowed_move_next_state_not_blocked
+    {m : Map} {player : Coord} {a : Action}
+    (h : MoveAllowed m player a) :
+    ¬ Blocked m (next_state m player a) := by
+  exact safeTile_not_blocked (allowed_move_preserves_next_state h)
+
+theorem allowed_move_next_state_not_dangerous
+    {m : Map} {player : Coord} {a : Action}
+    (h : MoveAllowed m player a) :
+    ¬ Dangerous m (next_state m player a) := by
+  exact safeTile_not_dangerous (allowed_move_preserves_next_state h)
 
 /--
 Soundness statement for a Python-style action mask.  If every action emitted by
