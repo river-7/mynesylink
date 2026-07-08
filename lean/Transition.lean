@@ -23,6 +23,15 @@ def adjacentB (a b : Coord) : Bool :=
 def reachableForInteractB (player target : Coord) : Bool :=
   sameCoordB player target || adjacentB player target
 
+def frontCoord (player : Coord) : Direction → Coord
+  | Direction.up => { player with y := player.y - 1 }
+  | Direction.down => { player with y := player.y + 1 }
+  | Direction.left => { player with x := player.x - 1 }
+  | Direction.right => { player with x := player.x + 1 }
+
+def targetInFrontB (s : State) (target : Object) : Bool :=
+  sameCoordB (frontCoord s.player s.facing) target.pos
+
 def replaceObject (oldObj newObj : Object) : List Object → List Object
   | [] => []
   | obj :: rest =>
@@ -38,7 +47,25 @@ noncomputable def move (s : State) (a : Action) : State :=
 def canAttackB (s : State) (target : Object) : Bool :=
   s.inventory.hasSword &&
   target.isAliveMonster &&
-  adjacentB s.player target.pos
+  targetInFrontB s target
+
+/-- 攻击动作的前置条件：有剑，并且面向方向的下一格是活怪物。 -/
+def AttackPreconditionSpec (s : State) (target : Object) : Prop :=
+  s.inventory.hasSword = true ∧
+  target.isAliveMonster = true ∧
+  targetInFrontB s target = true
+
+/--
+若符号执行层允许 attack，则攻击前置条件成立。
+
+这覆盖课程要求中的核心条件：玩家拥有武器；同时目标格是怪物。
+-/
+theorem AttackPrecondition
+    {s : State} {target : Object}
+    (h : canAttackB s target = true) :
+    AttackPreconditionSpec s target := by
+  simp [AttackPreconditionSpec, canAttackB] at h ⊢
+  exact ⟨h.1.1, h.1.2, h.2⟩
 
 /-- attack：有剑且目标怪物相邻时，将怪物标记为 defeated。 -/
 def attack (s : State) (target : Object) : State :=
@@ -48,7 +75,65 @@ def attack (s : State) (target : Object) : State :=
     s
 
 def canInteractB (s : State) (target : Object) : Bool :=
-  reachableForInteractB s.player target.pos
+  targetInFrontB s target
+
+/-- 交互对象的具体前置条件；门需要钥匙，其余可交互对象只要求类型匹配。 -/
+def InteractObjectPrecondition (s : State) (target : Object) : Prop :=
+  target.isClosedChest = true ∨
+  (target.isClosedDoor = true ∧ HasKey s) ∨
+  (target.kind == ObjectKind.button) = true ∨
+  (target.kind == ObjectKind.sword) = true
+
+/-- 交互动作的前置条件：目标在前方一格，且对象类型与交互规则匹配。 -/
+def InteractPreconditionSpec (s : State) (target : Object) : Prop :=
+  targetInFrontB s target = true ∧
+  InteractObjectPrecondition s target
+
+theorem InteractChestPrecondition
+    {s : State} {target : Object}
+    (h : canInteractB s target && target.isClosedChest = true) :
+    InteractPreconditionSpec s target := by
+  simp [InteractPreconditionSpec, InteractObjectPrecondition, canInteractB] at h ⊢
+  exact ⟨h.1, Or.inl h.2⟩
+
+theorem InteractDoorPrecondition
+    {s : State} {target : Object}
+    (h : canInteractB s target && target.isClosedDoor && (s.inventory.keys > 0) = true) :
+    InteractPreconditionSpec s target := by
+  simp [InteractPreconditionSpec, InteractObjectPrecondition, canInteractB, HasKey] at h ⊢
+  exact ⟨h.1.1, Or.inr (Or.inl ⟨h.1.2, h.2⟩)⟩
+
+theorem InteractButtonPrecondition
+    {s : State} {target : Object}
+    (h : canInteractB s target && (target.kind == ObjectKind.button) = true) :
+    InteractPreconditionSpec s target := by
+  simp [InteractPreconditionSpec, InteractObjectPrecondition, canInteractB] at h ⊢
+  exact ⟨h.1, Or.inr (Or.inr (Or.inl h.2))⟩
+
+theorem InteractSwordPrecondition
+    {s : State} {target : Object}
+    (h : canInteractB s target && (target.kind == ObjectKind.sword) = true) :
+    InteractPreconditionSpec s target := by
+  simp [InteractPreconditionSpec, InteractObjectPrecondition, canInteractB] at h ⊢
+  exact ⟨h.1, Or.inr (Or.inr (Or.inr h.2))⟩
+
+/--
+统一的 interact 前置条件定理：若某个具体交互分支的布尔守卫为真，
+则前方存在对应可交互对象；若对象是门，则物品栏中必须有钥匙。
+-/
+theorem InteractPrecondition
+    {s : State} {target : Object}
+    (h :
+      (canInteractB s target && target.isClosedChest = true) ∨
+      (canInteractB s target && target.isClosedDoor && (s.inventory.keys > 0) = true) ∨
+      (canInteractB s target && (target.kind == ObjectKind.button) = true) ∨
+      (canInteractB s target && (target.kind == ObjectKind.sword) = true)) :
+    InteractPreconditionSpec s target := by
+  rcases h with hChest | hDoor | hButton | hSword
+  · exact InteractChestPrecondition hChest
+  · exact InteractDoorPrecondition hDoor
+  · exact InteractButtonPrecondition hButton
+  · exact InteractSwordPrecondition hSword
 
 def interactChest (s : State) (target : Object) : State :=
   if canInteractB s target && target.isClosedChest then
