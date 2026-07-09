@@ -13,5 +13,9 @@ lean_lib Inventory
 
 lean_lib State
 
-@[default_target]
 lean_lib Transition
+
+lean_lib Goal
+
+@[default_target]
+lean_lib Planner
