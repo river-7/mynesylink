@@ -17,5 +17,7 @@ lean_lib Transition
 
 lean_lib Goal
 
+lean_lib ActionMaskProof
+
 @[default_target]
 lean_lib Planner
