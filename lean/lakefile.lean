@@ -17,5 +17,7 @@ lean_lib Transition
 
 lean_lib Goal
 
-@[default_target]
 lean_lib Planner
+
+@[default_target]
+lean_lib Path
