@@ -55,7 +55,6 @@ class TaskAgent:
         self._opened_chests: set[GridPos] = set()
         self._pending_attack_target: GridPos | None = None
         self._pressed_buttons: set[GridPos] = set()
-        self._last_debug_status: tuple[Any, ...] | None = None
         self._used_exit_sides_by_room: dict[tuple[GridPos, ...], set[str]] = {}
 
     def step(self, frame: np.ndarray, inventory: dict) -> int:
@@ -126,29 +125,24 @@ class TaskAgent:
             goal = exploration_goal
         elif self.state == TaskState.GO_TO_EXIT:
             goal = self._locked_exit_goal(player, goal, symbol_map)
-        self._debug_status(symbol_map, inventory, player, goal)
         visible_or_known_exits = set(symbol_map.exits) | self._known_exits
         if goal in visible_or_known_exits and self._player_on_exit_segment(player, visible_or_known_exits):
             self._move_ticks_remaining = 0
             self._move_action = ACTION_NOOP
             self._move_start_player = None
             self._mark_exit_used(player, visible_or_known_exits)
-            print(f"DEBUG portal outward: player={player}, goal={goal}, action={_outward_action(player)}")
             return _outward_action(player)
         should_press_switch = self._should_press_switch(symbol_map, inventory)
         if should_press_switch and goal in set(symbol_map.switches) and _manhattan(player, goal) == 1:
             self._record_switch_press(inventory)
             self._move_ticks_remaining = 0
             self._interaction_cooldown = 4
-            print(f"DEBUG interact: adjacent switch goal={goal}, player={player}, action=A")
             return ACTION_A
         should_open_chest = self.state in {TaskState.GET_KEY, TaskState.OPEN_CHEST}
         if should_open_chest and goal in self._available_chests(symbol_map) and _manhattan(player, goal) == 1:
             self._opened_chests.add(goal)
             self._move_ticks_remaining = 0
             self._interaction_cooldown = 2
-            print(f"DEBUG interact: adjacent chest goal={goal}, player={player}, action=A")
-            print(f"DEBUG A-action: player={player}, goal={goal}, inv={_inventory_debug_summary(inventory)}")
             return ACTION_A
         interaction = self._interaction_action(
             symbol_map,
@@ -175,20 +169,17 @@ class TaskAgent:
                 recovery = self._recovery_for_failed_move(symbol_map, player, self._move_action)
                 if recovery:
                     self._recovery_actions = recovery[1:]
-                    print(f"DEBUG recovery start: failed_tile={failed_tile}, actions={recovery}, player={player}")
                     self._move_action = ACTION_NOOP
                     self._move_start_player = None
                     return recovery[0]
                 if _in_bounds(failed_tile):
                     self._failed_tiles[failed_tile] = 80
-                print(f"DEBUG move failed: start={self._move_start_player}, action={self._move_action}, failed_tile={failed_tile}")
             self._move_action = ACTION_NOOP
             self._move_start_player = None
 
         # Pixel movement needs the same direction repeated for roughly one tile.
         if self._move_ticks_remaining > 0 and self._move_action != ACTION_NOOP:
             if self._move_start_player is not None and player != self._move_start_player:
-                print(f"DEBUG exec stop: tile_changed from={self._move_start_player} to={player}")
                 self._move_ticks_remaining = 0
                 self._move_action = ACTION_NOOP
                 self._move_start_player = None
@@ -205,14 +196,12 @@ class TaskAgent:
 
         actions = self._plan_actions(symbol_map, player, planned_goal)
         if not actions:
-            print(f"TRACE no_path: state={self.state.name}, player={player}, goal={goal}, planned={planned_goal}")
             return ACTION_NOOP
 
         action = actions[0]
         self._move_action = action
         self._move_ticks_remaining = max(TILE_SIZE - 1, 0)
         self._move_start_player = player
-        print(f"TRACE plan: state={self.state.name}, player={player}, goal={goal}, planned={planned_goal}, actions={actions[:8]}")
 
         return action
 
@@ -239,45 +228,7 @@ class TaskAgent:
         self._opened_chests = set()
         self._pending_attack_target = None
         self._pressed_buttons = set()
-        self._last_debug_status = None
         self._used_exit_sides_by_room = {}
-
-    def _debug_status(self, symbol_map, inventory: dict, player: GridPos, goal: GridPos | None) -> None:
-        keys = _inventory_key_count(inventory)
-        gold = inventory.get("gold", 0)
-        items = tuple(sorted(str(item) for item in inventory.get("items", ())))
-        nearest_monster_distance = None
-        if symbol_map.monsters:
-            nearest_monster_distance = min(_manhattan(player, monster) for monster in symbol_map.monsters)
-        snapshot = (
-            self.state,
-            player,
-            goal,
-            keys,
-            gold,
-            items,
-            len(self._available_chests(symbol_map)),
-            len(symbol_map.monsters),
-            len(symbol_map.exits),
-            len(symbol_map.buttons),
-            len(symbol_map.switches),
-            nearest_monster_distance,
-            self._entry_side,
-            tuple(sorted((room, tuple(sorted(sides))) for room, sides in self._used_exit_sides_by_room.items())),
-        )
-        if snapshot == self._last_debug_status:
-            return
-        self._last_debug_status = snapshot
-        print(
-            "TRACE status: "
-            f"state={self.state.name}, player={player}, goal={goal}, "
-            f"keys={keys}, gold={gold}, items={items}, "
-            f"chests={tuple(self._available_chests(symbol_map))}, "
-            f"monsters={tuple(symbol_map.monsters)}, exits={tuple(symbol_map.exits)}, "
-            f"buttons={tuple(symbol_map.buttons)}, switches={tuple(symbol_map.switches)}, "
-            f"nearest_monster_dist={nearest_monster_distance}, entry_side={self._entry_side}, "
-            f"used_exit_sides={self._used_exit_sides_for_exits(set(symbol_map.exits) | self._known_exits)}"
-        )
 
     def _interaction_action(
         self,
@@ -304,7 +255,6 @@ class TaskAgent:
                 if target in set(symbol_map.switches):
                     self._record_switch_press(inventory)
                 self._interaction_cooldown = 2
-                print(f"DEBUG interact A: player={player}, inv={_inventory_debug_summary(inventory)}")
                 return ACTION_A
 
         if _has_inventory_item(inventory, "sword", "has_sword") and symbol_map.monsters:
@@ -335,10 +285,8 @@ class TaskAgent:
         if self._pending_attack_target == target:
             self._pending_attack_target = None
             self._interaction_cooldown = 2
-            print(f"DEBUG defend A: player={player}, target={target}, inv={_inventory_debug_summary(inventory)}")
             return ACTION_A
         self._pending_attack_target = target
-        print(f"DEBUG face monster: player={player}, target={target}, action={face_action}")
         return face_action if face_action != ACTION_NOOP else ACTION_A
 
     def _apply_exploration_state(self, symbol_map, inventory: dict) -> None:
@@ -699,7 +647,7 @@ class TaskAgent:
 
 
 def get_action_mask(symbol_map, inventory: dict | None = None) -> list[bool]:
-    """Return a length-7 action mask for debugging or formal checks."""
+    """Return a length-7 action mask for formal checks."""
 
     del inventory
     mask = [True] * 7
@@ -707,7 +655,7 @@ def get_action_mask(symbol_map, inventory: dict | None = None) -> list[bool]:
     if player is None:
         return [True, False, False, False, False, False, False]
 
-    blocked = set(symbol_map.blocked_tiles())
+    blocked = set(symbol_map.blocked_tiles()) | set(symbol_map.danger_tiles())
     for action, (dx, dy) in _ACTION_TO_DELTA.items():
         nxt = (player[0] + dx, player[1] + dy)
         if not _in_bounds(nxt) or nxt in blocked:
@@ -724,28 +672,15 @@ def get_action_mask(symbol_map, inventory: dict | None = None) -> list[bool]:
 def run_episode(env, task_id: str, max_steps: int = 2000) -> None:
     agent = TaskAgent(task_id)
     obs, info = env.reset()
-    total_reward = 0.0
 
-    for step_idx in range(1, max_steps + 1):
+    for _ in range(1, max_steps + 1):
         frame = _extract_frame(obs, env)
-        # Debug only: final evaluation should pass inventory explicitly.
         inventory = _normalize_inventory(info.get("inventory", {})) if isinstance(info, dict) else {}
         action = agent.step(frame, inventory)
         obs, reward, terminated, truncated, info = env.step(action)
         agent.update_reward(float(reward))
-        total_reward += float(reward)
         if terminated or truncated:
-            terminal_reason = info.get("terminal_reason") if isinstance(info, dict) else None
-            event_counts = info.get("events", {}).get("counts", {}) if isinstance(info, dict) else {}
-            final_inventory = info.get("inventory", {}) if isinstance(info, dict) else {}
-            print(
-                f"episode finished: steps={step_idx}, reward={total_reward:.3f}, "
-                f"terminated={terminated}, truncated={truncated}, "
-                f"reason={terminal_reason}, inventory={final_inventory}, events={event_counts}"
-            )
             return
-
-    print(f"episode reached max_steps: steps={max_steps}, reward={total_reward:.3f}")
 
 
 def _extract_frame(obs: Any, env: Any | None = None) -> np.ndarray:
@@ -754,7 +689,6 @@ def _extract_frame(obs: Any, env: Any | None = None) -> np.ndarray:
             normalized = normalize_agent_observation(obs)
             return normalized.frame
         if env is not None:
-            # Debug only: full/grid observations are not used by the policy.
             return np.asarray(env.render())
         raise KeyError("dict observation must contain 'frame' or 'obs'")
     return np.asarray(obs)
@@ -806,14 +740,6 @@ def _inventory_key_count(inventory: dict) -> int:
         if isinstance(value, str) and value.isdigit():
             return int(value)
     return 0
-
-
-def _inventory_debug_summary(inventory: dict) -> dict[str, Any]:
-    return {
-        "keys": _inventory_key_count(inventory),
-        "gold": inventory.get("gold", 0),
-        "items": tuple(sorted(str(item) for item in inventory.get("items", ()))),
-    }
 
 
 def _player_on_exit(symbol_map) -> bool:
