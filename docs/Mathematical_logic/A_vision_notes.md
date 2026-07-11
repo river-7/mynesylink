@@ -1,32 +1,25 @@
-# A 视觉模块说明
+# A 视觉模块说明（新版测评）
 
-A 同学当前负责的是只基于图像帧的感知层：
+## 责任边界
+
+A 同学只负责把正式测评提供的 RGB `obs` 转为 `SymbolMap`，以及感知层的离线 oracle 测试。路径规划、Goal/FSM、动作下发和 Task 5 策略属于 B 同学，不在本模块修改范围内。
+
+最新版 `utils/evaluate_policy.py` 直接传入 shape 为 `(128, 160, 3)` 的 `uint8` 数组，而不是旧文档示意的 `obs["frame"]`。视觉模块同时保留字典输入兼容层，但正式入口以原始数组为准。
 
 ```python
 from submissions.vision import VisionState, detect
 
-symbol_map = detect(obs)  # obs 是 RGB frame，shape 为 (128, 160, 3)
+symbol_map = detect(obs)
 
 vision = VisionState()
 symbol_map = vision.observe(obs, reward=last_reward)
 ```
 
-检测器不读取 `info`、地图 JSON、物体坐标，也不读取环境的结构化 `grid` observation。结构化网格只在 `submissions/vision_smoke.py` 中作为本地调试 oracle 使用。
+运行时只读取像素。`info`、地图 JSON、结构化 grid、对象坐标和测评变体名称均不进入检测路径；grid 只在 `vision_smoke.py` 和 `vision_benchmark.py` 中作为本地 oracle。
 
-## 输出约定
+## 输出契约
 
-`detect(frame)` 返回 `SymbolMap`：
-
-- `grid`：shape 为 `(8, 10)` 的 `uint8` 数组
-- `player`：`(x, y) | None`
-- `monsters`、`chests`、`exits`、`walls`、`traps`、`buttons`、`switches`、`npcs`、`gaps`、`bridges`：由 `(x, y)` 组成的 tuple
-- `blocked_tiles()`：墙、箱子、NPC、缺口
-- `danger_tiles()`：陷阱、怪物
-- `passable_tiles(avoid_danger=True)`：供 planner/BFS/A* 使用的候选可通行格子
-
-`normalize_agent_observation(obs, reward, inventory)` 用于最终策略的输入归一化。它可以接收原始像素数组，也可以接收 README 风格、包含 `frame` 的字典观测，并且只向后传递允许使用的输入：frame、reward、显式 inventory。
-
-Cell code 与 NesyLink 的 debug grid 保持一致：
+坐标统一为 `(x, y)`，`grid[y, x]`；地图为 10 × 8，每格 16 × 16 像素。
 
 | Code | Cell |
 |---:|---|
@@ -34,38 +27,52 @@ Cell code 与 NesyLink 的 debug grid 保持一致：
 | 1 | wall |
 | 2 | player |
 | 3 | monster |
-| 4 | chest |
-| 5 | exit |
+| 4 | chest（包括带 key/gold/heal/sword 图标的宝箱） |
+| 5 | exit / door |
 | 6 | trap |
 | 7 | button |
 | 8 | npc |
-| 9 | gap |
+| 9 | gap / abyss |
 | 10 | bridge |
 | 11 | switch |
 
-## 当前方法
+`SymbolMap` 继续提供 `blocked_tiles()`、`danger_tiles()` 和 `passable_tiles()`；接口没有因本次修复而改变。
 
-地图大小是 10 x 8，每个格子是 16 x 16 像素。检测器会把 RGB frame 切成格子，并通过 renderer 的精确颜色计数对每个格子分类。这个方法刻意保持简单、可解释，也方便后续在报告或形式化描述中作为“图像到符号抽象”的假设说明。
+## 新版颜色鲁棒方案
 
-目前公开 Task1-Task5 的初始帧都能和环境 debug grid 精确对齐。
+正式 color 阶段循环 `grayscale`、`dark`、`bright`、`high_contrast`、`inverted`。旧实现只统计原始 RGB 精确值，因此五种变体全部失效。
 
-对于移动过程中的帧，集成 planner 时应优先使用 `VisionState.observe(...)`，不要只用无状态的 `detect(...)`。
+新版实现分两层：
+
+1. 从像素本身判断确定性颜色变换，不依赖 evaluator 传递变体名称。
+2. `dark`、`bright`、`inverted` 使用对应调色板计数；`grayscale` 和 `high_contrast` 已丢失部分颜色信息，改用渲染形状模板做逐 tile 最近匹配。
+
+模板只由公开 renderer 的几何绘制规则生成，不读取当前任务地图或运行时状态。模板结果按 `(x, y, variant)` 缓存，并将候选堆叠后用 NumPy 向量化比较。
+
+## 测试方法与当前结论
+
+```powershell
+.\.venv\Scripts\python.exe submissions\vision_smoke.py --steps 80
+.\.venv\Scripts\python.exe submissions\vision_benchmark.py --steps 200
+.\.venv\Scripts\python.exe submissions\vision_benchmark.py `
+  --steps 0 --obs-variants default `
+  --map-variants spatial_a spatial_b spatial_c
+```
+
+2026-07-12，seed 0：
+
+- 五个原始任务的初始帧：逐格完全对齐。
+- 五个任务 × 五种颜色变体的初始帧：逐格完全对齐。
+- 五个任务 × 三种空间地图变体的初始帧：逐格完全对齐。
+- Task 1 使用现有集成策略分别跑六种观测，均 1/1 成功；这是回归样本，不是正式 100 轮成绩。
+- Task 2 单 seed 回归中，灰度 1/1 成功；高对比完成击杀、开箱和拿钥匙，但 500 步内未到达出口。该失败尚不能仅凭事件统计判定为视觉或 Planner 问题。
+- 100 步灰度随机 rollout 的单次本机耗时约 2.9 秒，Task 1 静态准确率 0.9994，玩家精确率 0.9505。
+
+JSON 样本保存在 `results/vision_color_seed0.json`、`results/vision_spatial_seed0.json`、`results/task1_color_after_vision.json` 和 `results/task2_lossy_color_after_vision.json`。正式报告仍应按新版要求运行每 task 100 episodes 的 `--robustness-suite`，并把策略成功率与视觉准确率分开报告。
 
 ## 已知限制
 
-像素级移动时，玩家和怪物的精灵图可能跨在两个格子之间。因此单帧检测器在接近 tile 边界的少数中间帧上，可能和 debug grid 不完全一致。规划时建议采用以下做法之一：
-
-1. 使用 `VisionState.observe(frame)` 在多帧之间保留静态地图记忆。
-2. Executor 重复移动动作，直到玩家接近 tile 对齐后再重新规划。
-3. 在移动过程中，把玩家/怪物位置当成近似位置处理。
-
-## 本地检查
-
-```bash
-python submissions/vision_smoke.py --steps 80
-python submissions/vision_benchmark.py --steps 200
-```
-
-这些脚本会运行本地 oracle 对比，只用于调试，不应出现在最终策略的推理路径中。
-
-最新 benchmark 表格和两天压缩交付 checklist 见 `docs/Mathematical_logic/A_delivery_plan.md`。
+- 玩家和怪物在像素移动中会跨 tile，动态位置与 grid oracle 可能短暂相差一格；`VisionState` 会保留静态地图，但动态实体仍应视为近似位置。
+- 高对比变体会把多种颜色压成相同的 0/255 通道，怪物移动帧比静态物体更难区分；当前初始检测准确，但仍需长 rollout 和多 seed 统计。
+- 视觉层不会修复空间变体中的策略硬编码。若 `SymbolMap` 正确而通关失败，应交给 Planner/FSM 侧处理。
+- 视觉层不直接判断宝箱内的 key/sword 等语义；这些信息由宝箱图标和正式允许的 inventory 共同供上层使用，接口冻结前如需细分类别，应由 A/B 双方评审后新增字段。
