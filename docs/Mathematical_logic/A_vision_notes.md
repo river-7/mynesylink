@@ -76,3 +76,13 @@ JSON 样本保存在 `results/vision_color_seed0.json`、`results/vision_spatial
 - 高对比变体会把多种颜色压成相同的 0/255 通道，怪物移动帧比静态物体更难区分；当前初始检测准确，但仍需长 rollout 和多 seed 统计。
 - 视觉层不会修复空间变体中的策略硬编码。若 `SymbolMap` 正确而通关失败，应交给 Planner/FSM 侧处理。
 - 视觉层不直接判断宝箱内的 key/sword 等语义；这些信息由宝箱图标和正式允许的 inventory 共同供上层使用，接口冻结前如需细分类别，应由 A/B 双方评审后新增字段。
+
+## 2026-07-13 原色回归修复
+
+颜色鲁棒版本曾把动态实体候选限制为 `EMPTY`，导致玩家经过 exit、bridge 等非空 tile 时被错放到相邻格，进而破坏多房间切换。修复后：
+
+- 原色及 dark/bright/inverted 恢复原有动态定位行为。
+- grayscale/high_contrast 仅对真正有颜色混淆风险的动态候选做限制；玩家仍可覆盖 exit、bridge、trap、button、switch 和 gap。
+- Task 3 seed 0 恢复为 543 步成功，Task 4 seed 0 恢复为 1699 步成功。
+- 新增 Task 3 向西穿越出口的 scripted smoke regression。
+- 5 tasks × 3 spatial variants × default/grayscale/high_contrast 的初始帧全部逐格一致。

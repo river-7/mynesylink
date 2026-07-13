@@ -292,6 +292,7 @@ def detect(frame: np.ndarray) -> SymbolMap:
 def _detect_grid(frame: np.ndarray) -> np.ndarray:
     frame = _normalize_frame(frame)
     color_variant = _detect_color_variant(frame)
+    restrict_dynamic_tiles = color_variant in {"grayscale", "high_contrast"}
     grid = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8)
     for y in range(GRID_HEIGHT):
         for x in range(GRID_WIDTH):
@@ -306,6 +307,7 @@ def _detect_grid(frame: np.ndarray) -> np.ndarray:
         _variant_colors(_PLAYER_GREEN, color_variant),
         Cell.PLAYER,
         min_pixels=16,
+        restrict_to_traversable=restrict_dynamic_tiles,
     )
     _place_dynamic_tile_groups(
         grid,
@@ -313,6 +315,7 @@ def _detect_grid(frame: np.ndarray) -> np.ndarray:
         _variant_colors(_MONSTER_BODY, color_variant),
         Cell.MONSTER,
         min_pixels=12,
+        restrict_to_traversable=restrict_dynamic_tiles,
     )
     return grid
 
@@ -389,9 +392,11 @@ def _place_single_dynamic_tile(
     cell: Cell,
     *,
     min_pixels: int,
+    restrict_to_traversable: bool,
 ) -> None:
     counts = _tile_color_counts(frame, colors)
-    counts[(grid != int(Cell.EMPTY)) & (grid != int(cell))] = 0
+    if restrict_to_traversable:
+        counts[~_dynamic_candidate_mask(grid, cell)] = 0
     best = int(counts.max())
     if best < min_pixels:
         return
@@ -407,9 +412,13 @@ def _place_dynamic_tile_groups(
     cell: Cell,
     *,
     min_pixels: int,
+    restrict_to_traversable: bool,
 ) -> None:
     counts = _tile_color_counts(frame, colors)
-    eligible = (grid == int(Cell.EMPTY)) | (grid == int(cell))
+    if restrict_to_traversable:
+        eligible = _dynamic_candidate_mask(grid, cell)
+    else:
+        eligible = np.ones_like(grid, dtype=bool)
     active = (counts >= min_pixels) & eligible
     seen = np.zeros_like(active, dtype=bool)
     grid[grid == int(cell)] = int(Cell.EMPTY)
@@ -429,6 +438,29 @@ def _place_dynamic_tile_groups(
                     stack.append((ny, nx))
         best_y, best_x = max(group, key=lambda pos: counts[pos[0], pos[1]])
         grid[best_y, best_x] = int(cell)
+
+
+def _dynamic_candidate_mask(grid: np.ndarray, cell: Cell) -> np.ndarray:
+    """Keep lossy-color matching away from solid objects, not traversable tiles.
+
+    Players and monsters can visibly overlap exits, bridges, traps, buttons and
+    switches while moving. Treating every non-empty tile as ineligible shifts
+    them into a neighbouring tile and breaks room-transition tracking.
+    """
+
+    allowed = {int(Cell.EMPTY), int(cell)}
+    if cell == Cell.PLAYER:
+        allowed.update(
+            {
+                int(Cell.EXIT),
+                int(Cell.TRAP),
+                int(Cell.BUTTON),
+                int(Cell.BRIDGE),
+                int(Cell.SWITCH),
+                int(Cell.GAP),
+            }
+        )
+    return np.isin(grid, tuple(allowed))
 
 
 def _count_colors(tile: np.ndarray, colors: Iterable[Color]) -> int:
