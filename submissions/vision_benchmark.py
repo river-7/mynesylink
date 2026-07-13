@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from nesylink.env import make_env
 from submissions.vision import Cell, VisionState
+from utils.evaluate_policy import apply_obs_variant, materialize_spatial_map_variant
 
 
 DEFAULT_TASKS = tuple(f"mathematical_logic/task_{index}" for index in range(1, 6))
@@ -35,6 +37,8 @@ STATIC_CELLS = {
 class VisionBenchmarkResult:
     task_id: str
     seed: int
+    obs_variant: str
+    map_variant: str
     frames: int
     static_cells: int
     static_errors: int
@@ -107,10 +111,24 @@ def closest_total_distance(
     return exact, distance_sum
 
 
-def evaluate_task(task_id: str, *, seed: int, steps: int) -> VisionBenchmarkResult:
+def evaluate_task(
+    task_id: str,
+    *,
+    seed: int,
+    steps: int,
+    obs_variant: str = "default",
+    map_variant: str = "default",
+) -> VisionBenchmarkResult:
     rng = np.random.default_rng(seed)
-    pixel_env = make_env(task_id=task_id, observation_mode="pixels")
-    grid_env = make_env(task_id=task_id, observation_mode="grid")
+    variant_root: Path | None = None
+    if map_variant == "default":
+        env_kwargs = {"task_id": task_id}
+    else:
+        map_path = materialize_spatial_map_variant(task_id, map_variant, seed=seed)
+        variant_root = map_path.parent.parent if map_path.name == "dungeon.json" else map_path.parent
+        env_kwargs = {"task_id": task_id, "map_path": map_path}
+    pixel_env = make_env(**env_kwargs, observation_mode="pixels")
+    grid_env = make_env(**env_kwargs, observation_mode="grid")
     vision = VisionState()
     frame_count = 0
     static_cells = 0
@@ -123,7 +141,8 @@ def evaluate_task(task_id: str, *, seed: int, steps: int) -> VisionBenchmarkResu
     monster_manhattan_sum = 0
 
     try:
-        frame, _ = pixel_env.reset(seed=seed)
+        raw_frame, _ = pixel_env.reset(seed=seed)
+        frame = apply_obs_variant(raw_frame, obs_variant)
         expected, _ = grid_env.reset(seed=seed)
         for step in range(steps + 1):
             symbol_map = vision.observe(frame)
@@ -154,17 +173,26 @@ def evaluate_task(task_id: str, *, seed: int, steps: int) -> VisionBenchmarkResu
             if step == steps:
                 break
             action = int(rng.integers(0, pixel_env.action_space.n))
-            frame, _, terminated, truncated, _ = pixel_env.step(action)
+            raw_frame, _, terminated, truncated, _ = pixel_env.step(action)
+            frame = apply_obs_variant(raw_frame, obs_variant)
             expected, _, expected_terminated, expected_truncated, _ = grid_env.step(action)
             if terminated or truncated or expected_terminated or expected_truncated:
                 break
     finally:
         pixel_env.close()
         grid_env.close()
+        if variant_root is not None:
+            shutil.rmtree(variant_root, ignore_errors=True)
+            try:
+                variant_root.parent.rmdir()
+            except OSError:
+                pass
 
     return VisionBenchmarkResult(
         task_id=task_id,
         seed=seed,
+        obs_variant=obs_variant,
+        map_variant=map_variant,
         frames=frame_count,
         static_cells=static_cells,
         static_errors=static_errors,
@@ -182,13 +210,35 @@ def main() -> None:
     parser.add_argument("--tasks", nargs="+", default=list(DEFAULT_TASKS))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int, default=200)
+    parser.add_argument(
+        "--obs-variants",
+        nargs="+",
+        default=["default", "grayscale", "dark", "bright", "high_contrast", "inverted"],
+    )
+    parser.add_argument(
+        "--map-variants",
+        nargs="+",
+        default=["default"],
+        choices=["default", "spatial_a", "spatial_b", "spatial_c"],
+    )
     parser.add_argument("--json-out", type=Path, default=None)
     args = parser.parse_args()
 
-    results = [evaluate_task(task_id, seed=args.seed, steps=args.steps) for task_id in args.tasks]
+    results = [
+        evaluate_task(
+            task_id,
+            seed=args.seed,
+            steps=args.steps,
+            obs_variant=obs_variant,
+            map_variant=map_variant,
+        )
+        for task_id in args.tasks
+        for map_variant in args.map_variants
+        for obs_variant in args.obs_variants
+    ]
     for result in results:
         print(
-            f"{result.task_id}: frames={result.frames} "
+            f"{result.task_id} obs={result.obs_variant} map={result.map_variant}: frames={result.frames} "
             f"static_acc={result.static_accuracy:.4f} "
             f"player_exact={result.player_exact_rate:.4f} "
             f"player_avg_dist={result.player_avg_manhattan:.3f} "

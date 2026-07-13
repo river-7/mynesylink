@@ -1,130 +1,48 @@
-# A 同学交付计划
+# A 同学交付计划（按最新版要求修订）
 
-这份计划把 A 同学的工作压缩到两天内完成，同时严格遵守项目 README 的要求：最终推理只能使用图像帧、奖励历史，以及显式提供的背包/物品信息。`info`、地图 JSON、隐藏物体坐标、调试网格只能用于本地调试和统计评估，不能进入最终策略的推理路径。
+## 最新基线的正确解读
 
-## 已完成内容
+组长提供的是端到端任务成功率，不是单独的视觉准确率：
 
-- 实现了 `submissions/vision.py`。
-- 添加了 `detect(frame) -> SymbolMap`，用于单帧图像感知。
-- 添加了 `VisionState.observe(frame, reward=...) -> SymbolMap`，用于静态地图记忆和动态实体连续跟踪。
-- 添加了 `normalize_agent_observation(obs, reward, inventory)`，使最终策略既能接收原始像素数组，也能接收 README 风格、包含 `frame` 的字典观测。
-- 添加了本地 oracle 检查脚本 `submissions/vision_smoke.py`。
-- 添加了定量 benchmark 脚本 `submissions/vision_benchmark.py`。
-- 添加了 `submissions/vision_policy.py`，作为一个最小的、只使用图像帧的集成验证策略，证明视觉输出可以驱动路径规划、开箱、战斗和出入口切换。
-- 使用 `utils/evaluate_policy.py` 验证了 Task1、Task2、Task3、Task4：每个任务 3/3 seeds 通过。
-- 在不读取 `info` 的前提下，为开过的箱子、已知出口、击杀怪物流程、钥匙收集、Task3 西/东房间遍历、Task4 桥/开关路线添加了任务链记忆。
+| Task | Original | Spatial | Color | 需要区分的问题 |
+|---|---:|---:|---:|---|
+| Task 1 | 100% | 0% | 0% | Color 明确暴露旧视觉精确颜色依赖；Spatial 还可能包含 Planner 坐标硬编码 |
+| Task 2 | 100% | 66.7% | 0% | 感知颜色鲁棒性需修复；剩余空间失败需由 B 侧根据符号图排查 |
+| Task 3 | 100% | 33.3% | 0% | 同上，多房间记忆/目标顺序不属于 A 侧 |
+| Task 4 | 100% | 33.3% | 0% | A 侧保证桥、gap、switch 等可见；机制策略属于 B 侧 |
+| Task 5 | 0% | 0% | 0% | 原图也失败，主要是综合策略未完成，不能归因给颜色感知 |
 
-## 给 Planner 的接口
+因此本轮 A 侧交付标准是：证明 `SymbolMap` 在 original/spatial/color 像素上是否正确，并保持既有接口；不修改 `planner.py`、`fsm.py`、`agent.py`、`vision_policy.py` 或学生策略文件。
 
-```python
-from submissions.vision import VisionState
+## 已完成
 
-vision = VisionState()
-symbol_map = vision.observe(frame, reward=last_reward)
+- 安装 Python 3.12.10，创建仓库级 `.venv`，执行 `pip install -e .`。
+- 更新 `submissions/vision.py`，支持正式五种颜色变体的自动识别。
+- 对灰度/高对比观测增加不依赖地图状态的形状模板匹配和缓存。
+- 保持 `detect(frame) -> SymbolMap`、`VisionState.observe(...)` 与 `SymbolMap` 字段不变。
+- 扩展 `submissions/vision_benchmark.py`，可交叉测试 `--obs-variants` 和 `--map-variants`，并继续以 grid 作为仅测试期 oracle。
+- 完成 5 tasks × 6 observations 的初始帧检查，全部逐格一致。
+- 完成 5 tasks × 3 spatial variants 的初始帧检查，全部逐格一致。
+- 完成 Task 1 六种观测的端到端单 seed 回归，全部成功。
+- 完成 Task 2 灰度/高对比诊断：灰度成功；高对比已完成击杀、开箱和拿钥匙，但未完成出口阶段，需 A/B 联合做只读轨迹归因。
 
-player = symbol_map.player
-blocked = symbol_map.blocked_tiles()
-danger = symbol_map.danger_tiles()
-passable = symbol_map.passable_tiles(avoid_danger=True)
-targets = {
-    "exits": symbol_map.exits,
-    "chests": symbol_map.chests,
-    "monsters": symbol_map.monsters,
-    "buttons": symbol_map.buttons,
-    "switches": symbol_map.switches,
-}
+## 下一轮 A 侧验收
+
+1. 对五个任务、五种颜色变体运行至少 200 步、多 seed 的视觉 benchmark，重点统计移动怪物。
+2. 与 B 同学冻结 `SymbolMap`：确认是否需要显式的宝箱 loot 图标类别；未确认前不擅自改接口。
+3. 让 B 同学用现有 Planner 跑正式 `--robustness-suite`。A 只分析其中由错误符号图导致的失败轨迹。
+4. Day 6 输出视觉 benchmark JSON/CSV、代表性截图和报告中的感知章节。
+5. Day 7 只修视觉 bug，不新增规划功能。
+
+## 正式测评命令
+
+```powershell
+.\.venv\Scripts\python.exe utils\evaluate_policy.py `
+  --policy submissions\student_policy.py `
+  --info-mode safe `
+  --robustness-suite `
+  --num-envs 100 `
+  --json-out results\robustness_suite_eval.json
 ```
 
-坐标格式是 `(x, y)`，其中 `x` 是列号 `0..9`，`y` 是行号 `0..7`，`grid[y, x]` 是该格子的符号编码。
-
-## 当前 Benchmark
-
-命令：
-
-```bash
-python submissions/vision_benchmark.py --steps 200
-```
-
-最新本地结果，统计 seeds 0-4、每个 seed 200 steps 的平均值：
-
-| Task | 静态格准确率 | 玩家精确率 | 玩家平均距离 | 怪物精确率 | 怪物平均距离 |
-|---|---:|---:|---:|---:|---:|
-| task_1 | 0.9990 | 0.9164 | 0.083 | 1.0000 | 0.000 |
-| task_2 | 0.9960 | 0.9134 | 0.086 | 0.7762 | 0.230 |
-| task_3 | 0.9989 | 0.9134 | 0.086 | 1.0000 | 0.000 |
-| task_4 | 0.9989 | 0.9164 | 0.083 | 1.0000 | 0.000 |
-| task_5 | 0.9983 | 0.9134 | 0.086 | 0.9552 | 0.045 |
-
-解释：静态地形和可交互物体已经比较稳定。玩家和怪物的精确率较低，主要是因为像素级移动时，环境 debug grid 使用实体中心点，而精灵图在视觉上可能跨在两个格子之间。Planner/Executor 应该在 tile center 附近重新规划，或者把动态实体位置视作近似的一格障碍。
-
-## A 侧剩余工作
-
-第 1 天：
-
-- 保留 `vision_policy.py` 作为回归验证 harness：后续继续加行为时，Task1-4 必须保持通过。
-- 如果最终 planner 需要更干净的动作接口，可以为 B 同学的 executor 补一个可选的 tile-alignment helper。
-- 如报告需要，保存代表性的视觉/调试截图。
-- 和 B 同学冻结 `SymbolMap` 接口。
-
-第 2 天：
-
-- 在多个 seeds 上运行 benchmark，并导出 JSON/CSV。
-- 通过 `VisionState` 和 B 同学的 planner 集成。
-- 在当前 key-door-heal-gold 路线之后继续清理 Task5：西房间宝箱、剩余战斗、最终全箱子完成。
-- 编写最终报告中的 A 部分：感知假设、无 `info` 保证、已知限制、benchmark 表格。
-- 最后检查提交策略不读取 `info`，除非 evaluator 显式暴露且 README 允许使用的 inventory 信息。
-
-## 当前策略 Smoke Test
-
-```bash
-python utils/evaluate_policy.py --policy submissions/vision_policy.py --tasks mathematical_logic/task_1 mathematical_logic/task_2 --num-envs 3 --max-steps 1200
-python utils/evaluate_policy.py --policy submissions/vision_policy.py --tasks mathematical_logic/task_3 --num-envs 3 --max-steps 1500
-python utils/evaluate_policy.py --policy submissions/vision_policy.py --tasks mathematical_logic/task_4 --num-envs 3 --max-steps 2600
-python utils/evaluate_policy.py --policy submissions/vision_policy.py --tasks mathematical_logic/task_5 --num-envs 1 --max-steps 2000
-```
-
-结果：
-
-```text
-mathematical_logic/task_1
-success_rate: 1.000
-avg_steps:    293.0
-avg_reward:   126.720
-
-mathematical_logic/task_2
-success_rate: 1.000
-avg_steps:    175.0
-avg_reward:   128.250
-
-mathematical_logic/task_3
-success_rate: 1.000
-avg_steps:    541.0
-avg_reward:   164.590
-monster_killed: 1.000
-key_collected: 1.000
-
-mathematical_logic/task_4
-success_rate: 1.000
-avg_steps:    1152.0
-avg_reward:   250.080
-switch_activated: 1.000
-key_collected: 1.000
-door_opened: 1.000
-item_collected: 1.000
-monster_killed: 1.000
-
-mathematical_logic/task_5
-success_rate: 0.000
-avg_steps:    1000.0
-avg_reward:   40.400
-chest_opened: 1.000
-button_pressed: 1.000
-key_collected: 1.000
-door_opened: 1.000
-agent_healed: 1.000
-gold_collected: 1.000
-monster_killed: 1.000
-trap_triggered: 0.000
-```
-
-`vision_policy.py` 仍然是 A 侧的集成验证 harness，不是小组最终 planner。它目前证明了：在 README 限制下，只使用图像帧也能稳定通过 Task1-4，并在 Task5 中推进到 button-key-door-heal-gold 链条，同时完成一次击杀，作为部分得分 baseline。
+按老师最新版文档，报告必须分别列出每个 Task 的 `original`、`spatial`、`color` 成功率，并记录实际命令、seed、episodes、代码版本及是否覆盖 `max_steps`/`action_repeat`。视觉 benchmark 只能解释错误来源，不能替代正式成功率。
