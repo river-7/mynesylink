@@ -655,7 +655,7 @@ def get_action_mask(symbol_map, inventory: dict | None = None) -> list[bool]:
     if player is None:
         return [True, False, False, False, False, False, False]
 
-    blocked = set(symbol_map.blocked_tiles()) | set(symbol_map.danger_tiles())
+    blocked = set(symbol_map.blocked_tiles())
     for action, (dx, dy) in _ACTION_TO_DELTA.items():
         nxt = (player[0] + dx, player[1] + dy)
         if not _in_bounds(nxt) or nxt in blocked:
