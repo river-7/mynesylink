@@ -59,6 +59,7 @@ class TaskAgent:
         self._pressed_buttons: set[GridPos] = set()
         self._used_exit_sides_by_room: dict[tuple[GridPos, ...], set[str]] = {}
         self._blocked_exit_sides_by_room: dict[tuple[GridPos, ...], set[str]] = {}
+        self._recent_monster_seen_ticks = 0
 
     def step(self, frame: np.ndarray, inventory: dict) -> int:
         symbol_map = self.vision.observe(frame, reward=self.last_reward)
@@ -70,6 +71,7 @@ class TaskAgent:
             return ACTION_NOOP
         self._reconcile_pending_chest(symbol_map, inventory)
         self._reconcile_visible_chests(symbol_map, inventory)
+        self._update_recent_monster_memory(symbol_map)
 
         if symbol_map.player is not None:
             self._last_room_jump = False
@@ -163,8 +165,10 @@ class TaskAgent:
             self._move_ticks_remaining = 0
             self._interaction_cooldown = 4
             return ACTION_A
-        should_open_chest = self.state in {TaskState.GET_KEY, TaskState.OPEN_CHEST}
-        if should_open_chest and goal in self._available_chests(symbol_map) and _manhattan(player, goal) == 1:
+        suspected_chests = set(self._suspected_revealed_chests(symbol_map, inventory))
+        should_open_chest = self.state in {TaskState.GET_KEY, TaskState.OPEN_CHEST} or goal in suspected_chests
+        chest_targets = set(self._available_chests(symbol_map)) | suspected_chests
+        if should_open_chest and goal in chest_targets and _manhattan(player, goal) == 1:
             self._move_ticks_remaining = 0
             self._move_action = ACTION_NOOP
             self._move_start_player = None
@@ -259,6 +263,7 @@ class TaskAgent:
         self._pressed_buttons = set()
         self._used_exit_sides_by_room = {}
         self._blocked_exit_sides_by_room = {}
+        self._recent_monster_seen_ticks = 0
 
     def _interaction_action(
         self,
@@ -321,12 +326,28 @@ class TaskAgent:
         self._pending_chest_open = None
 
     def _reconcile_visible_chests(self, symbol_map, inventory: dict) -> None:
-        if self.state != TaskState.GET_KEY or _inventory_key_count(inventory) > 0:
-            return
         visible_chests = set(symbol_map.chests)
         if not visible_chests:
             return
+        reward_chest_revealed = self._guardian_reward_chest_context(symbol_map, inventory)
+        reused_after_guardian = (
+            reward_chest_revealed
+            and (self._recent_monster_seen_ticks > 0 or reward_chest_revealed)
+            and not symbol_map.monsters
+            and bool(visible_chests & self._opened_chests)
+        )
+        if reused_after_guardian:
+            self._opened_chests.difference_update(visible_chests)
+            return
+        if self.state != TaskState.GET_KEY or _inventory_key_count(inventory) > 0:
+            return
         self._opened_chests.difference_update(visible_chests)
+
+    def _update_recent_monster_memory(self, symbol_map) -> None:
+        if symbol_map.monsters:
+            self._recent_monster_seen_ticks = 12
+        elif self._recent_monster_seen_ticks > 0:
+            self._recent_monster_seen_ticks -= 1
 
     def _defensive_action(self, symbol_map, inventory: dict, player: GridPos) -> int | None:
         if not symbol_map.monsters:
@@ -358,11 +379,7 @@ class TaskAgent:
         if self._available_chests(symbol_map):
             self.state = TaskState.GET_KEY
             return
-        if (
-            self.state == TaskState.KILL_GUARDIAN
-            and symbol_map.monsters
-            and _has_inventory_item(inventory, "sword", "has_sword")
-        ):
+        if symbol_map.monsters and _has_inventory_item(inventory, "sword", "has_sword"):
             self.state = TaskState.KILL_GUARDIAN
             return
         if _inventory_key_count(inventory) > 0:
@@ -379,6 +396,11 @@ class TaskAgent:
             return button_goal
         if self._should_press_switch(symbol_map, inventory):
             return min(symbol_map.switches, key=lambda pos: _manhattan(player, pos))
+        if self.state == TaskState.KILL_GUARDIAN and symbol_map.monsters and _has_inventory_item(inventory, "sword", "has_sword"):
+            return min(symbol_map.monsters, key=lambda pos: _manhattan(player, pos))
+        suspected_chests = self._suspected_revealed_chests(symbol_map, inventory)
+        if suspected_chests:
+            return min(suspected_chests, key=lambda pos: self._suspected_chest_priority(symbol_map, player, pos))
         key_count = _inventory_key_count(inventory)
         if key_count > 0:
             if self._entry_side is not None and symbol_map.exits:
@@ -387,18 +409,39 @@ class TaskAgent:
                 return None
             return self._choose_room_exit(symbol_map, player, prefer_unvisited=True)
         if not symbol_map.exits:
-            if self.state == TaskState.KILL_GUARDIAN and symbol_map.monsters and _has_inventory_item(inventory, "sword", "has_sword"):
-                return min(symbol_map.monsters, key=lambda pos: _manhattan(player, pos))
             return None
         exit_goal = self._choose_room_exit(symbol_map, player)
         if exit_goal is not None:
             return exit_goal
-        if self.state == TaskState.KILL_GUARDIAN and symbol_map.monsters and _has_inventory_item(inventory, "sword", "has_sword"):
-            return min(symbol_map.monsters, key=lambda pos: _manhattan(player, pos))
         return None
 
     def _available_chests(self, symbol_map) -> tuple[GridPos, ...]:
         return tuple(chest for chest in symbol_map.chests if chest not in self._opened_chests)
+
+    def _suspected_revealed_chests(self, symbol_map, inventory: dict) -> tuple[GridPos, ...]:
+        if symbol_map.chests or symbol_map.monsters:
+            return ()
+        if not self._guardian_reward_chest_context(symbol_map, inventory):
+            return ()
+        return tuple(sorted(pos for pos in self._opened_chests if _in_bounds(pos)))
+
+    def _guardian_reward_chest_context(self, symbol_map, inventory: dict) -> bool:
+        return (
+            len(symbol_map.exits) >= 3
+            and len(self._opened_chests) >= 2
+            and _has_inventory_item(inventory, "sword", "has_sword")
+            and _inventory_gold_count(inventory) > 0
+            and not symbol_map.monsters
+        )
+
+    def _suspected_chest_priority(self, symbol_map, player: GridPos, target: GridPos) -> tuple[int, int]:
+        adjacent = self._adjacent_goal(symbol_map, target)
+        if adjacent is None:
+            return (999, _manhattan(player, target))
+        if adjacent == player:
+            return (0, _manhattan(player, target))
+        actions = plan_path(symbol_map, player, adjacent)
+        return (len(actions) if actions else 999, _manhattan(player, target))
 
     def _choose_room_exit(self, symbol_map, player: GridPos, *, prefer_unvisited: bool = False) -> GridPos | None:
         exits = tuple(symbol_map.exits)
@@ -538,6 +581,7 @@ class TaskAgent:
             set(symbol_map.chests)
             | set(symbol_map.monsters)
             | set(symbol_map.switches)
+            | set(self._opened_chests)
         )
         return goal in interactive_targets
 
@@ -891,6 +935,18 @@ def _has_inventory_item(inventory: dict, *names: str) -> bool:
 
 def _inventory_key_count(inventory: dict) -> int:
     for name in ("keys", "key"):
+        value = inventory.get(name)
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return 0
+
+
+def _inventory_gold_count(inventory: dict) -> int:
+    for name in ("gold", "coins", "coin"):
         value = inventory.get(name)
         if isinstance(value, bool):
             return int(value)
