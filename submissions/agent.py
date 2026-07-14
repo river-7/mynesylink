@@ -53,8 +53,10 @@ class TaskAgent:
         self._entry_side: str | None = None
         self._switch_stages_pressed: set[tuple[bool, bool]] = set()
         self._opened_chests: set[GridPos] = set()
+        self._confirmed_opened_chests: set[GridPos] = set()
         self._pending_chest_target: GridPos | None = None
         self._pending_chest_open: GridPos | None = None
+        self._pending_chest_inventory: tuple[int, int, bool] | None = None
         self._pending_attack_target: GridPos | None = None
         self._pressed_buttons: set[GridPos] = set()
         self._used_exit_sides_by_room: dict[tuple[GridPos, ...], set[str]] = {}
@@ -173,7 +175,7 @@ class TaskAgent:
             self._move_action = ACTION_NOOP
             self._move_start_player = None
             self._recovery_actions = []
-            return self._face_then_open_chest(player, goal)
+            return self._face_then_open_chest(player, goal, inventory)
         interaction = self._interaction_action(
             symbol_map,
             inventory,
@@ -257,8 +259,10 @@ class TaskAgent:
         self._entry_side = None
         self._switch_stages_pressed = set()
         self._opened_chests = set()
+        self._confirmed_opened_chests = set()
         self._pending_chest_target = None
         self._pending_chest_open = None
+        self._pending_chest_inventory = None
         self._pending_attack_target = None
         self._pressed_buttons = set()
         self._used_exit_sides_by_room = {}
@@ -289,7 +293,7 @@ class TaskAgent:
                     self._move_action = ACTION_NOOP
                     self._move_start_player = None
                     self._recovery_actions = []
-                    return self._face_then_open_chest(player, target)
+                    return self._face_then_open_chest(player, target, inventory)
                 if target in set(symbol_map.switches):
                     self._record_switch_press(inventory)
                 self._interaction_cooldown = 2
@@ -301,11 +305,12 @@ class TaskAgent:
                 return self._face_then_attack(player, monster, inventory)
         return None
 
-    def _face_then_open_chest(self, player: GridPos, target: GridPos) -> int:
+    def _face_then_open_chest(self, player: GridPos, target: GridPos, inventory: dict) -> int:
         face_action = _action_between(player, target)
         if self._pending_chest_target == target:
             self._pending_chest_target = None
             self._pending_chest_open = target
+            self._pending_chest_inventory = _inventory_open_signature(inventory)
             self._interaction_cooldown = 2
             return ACTION_A
         self._pending_chest_target = target
@@ -315,15 +320,24 @@ class TaskAgent:
         if self._pending_chest_open is None:
             return
         target = self._pending_chest_open
+        before = self._pending_chest_inventory
+        after = _inventory_open_signature(inventory)
+        inventory_gain = before is not None and (
+            after[0] > before[0]
+            or after[1] > before[1]
+            or (after[2] and not before[2])
+        )
         opened_by_feedback = (
             self.last_reward > 0.5
-            or _inventory_key_count(inventory) > 0
-            or _has_inventory_item(inventory, "sword", "has_sword")
+            or inventory_gain
             or target not in set(symbol_map.chests)
         )
         if opened_by_feedback:
             self._opened_chests.add(target)
+        if inventory_gain:
+            self._confirmed_opened_chests.add(target)
         self._pending_chest_open = None
+        self._pending_chest_inventory = None
 
     def _reconcile_visible_chests(self, symbol_map, inventory: dict) -> None:
         visible_chests = set(symbol_map.chests)
@@ -341,7 +355,7 @@ class TaskAgent:
             return
         if self.state != TaskState.GET_KEY or _inventory_key_count(inventory) > 0:
             return
-        self._opened_chests.difference_update(visible_chests)
+        self._opened_chests.difference_update(visible_chests - self._confirmed_opened_chests)
 
     def _update_recent_monster_memory(self, symbol_map) -> None:
         if symbol_map.monsters:
@@ -955,6 +969,14 @@ def _inventory_gold_count(inventory: dict) -> int:
         if isinstance(value, str) and value.isdigit():
             return int(value)
     return 0
+
+
+def _inventory_open_signature(inventory: dict) -> tuple[int, int, bool]:
+    return (
+        _inventory_key_count(inventory),
+        _inventory_gold_count(inventory),
+        _has_inventory_item(inventory, "sword", "has_sword"),
+    )
 
 
 def _player_on_exit(symbol_map) -> bool:
