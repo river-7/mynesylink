@@ -58,6 +58,7 @@ class TaskAgent:
         self._pending_attack_target: GridPos | None = None
         self._pressed_buttons: set[GridPos] = set()
         self._used_exit_sides_by_room: dict[tuple[GridPos, ...], set[str]] = {}
+        self._blocked_exit_sides_by_room: dict[tuple[GridPos, ...], set[str]] = {}
 
     def step(self, frame: np.ndarray, inventory: dict) -> int:
         symbol_map = self.vision.observe(frame, reward=self.last_reward)
@@ -100,6 +101,7 @@ class TaskAgent:
             self._pressed_buttons.add(player)
         self._apply_exploration_state(symbol_map, inventory)
         self._known_exits.update(symbol_map.exits)
+        self._record_blocked_exit_feedback(symbol_map, inventory, player)
 
         defensive_action = self._defensive_action(symbol_map, inventory, player)
         if defensive_action is not None:
@@ -148,11 +150,12 @@ class TaskAgent:
         elif self.state == TaskState.GO_TO_EXIT:
             goal = self._locked_exit_goal(player, goal, symbol_map)
         visible_or_known_exits = set(symbol_map.exits) | self._known_exits
-        if goal in visible_or_known_exits and self._player_on_exit_segment(player, visible_or_known_exits):
+        goal_exit_component = _exit_component(visible_or_known_exits, goal) if goal in visible_or_known_exits else set()
+        if goal in visible_or_known_exits and self._player_on_exit_segment(player, goal_exit_component):
             self._move_ticks_remaining = 0
             self._move_action = ACTION_NOOP
             self._move_start_player = None
-            self._mark_exit_used(player, visible_or_known_exits)
+            self._mark_exit_used(player, goal_exit_component)
             return _outward_action(player)
         should_press_switch = self._should_press_switch(symbol_map, inventory)
         if should_press_switch and goal in set(symbol_map.switches) and _manhattan(player, goal) == 1:
@@ -255,6 +258,7 @@ class TaskAgent:
         self._pending_attack_target = None
         self._pressed_buttons = set()
         self._used_exit_sides_by_room = {}
+        self._blocked_exit_sides_by_room = {}
 
     def _interaction_action(
         self,
@@ -408,9 +412,17 @@ class TaskAgent:
             candidates = [exit_pos for exit_pos in exits if _boundary_side(exit_pos) != self._entry_side]
             if not candidates:
                 candidates = list(exits)
+        blocked_sides = self._blocked_exit_sides_for_exits(set(exits))
+        if blocked_sides:
+            unblocked = [exit_pos for exit_pos in candidates if _boundary_side(exit_pos) not in blocked_sides]
+            if unblocked:
+                candidates = unblocked
         reachable = [exit_pos for exit_pos in candidates if self._exit_is_reachable(symbol_map, player, exit_pos)]
         if not reachable and excluded_entry_side:
-            reachable = [exit_pos for exit_pos in exits if self._exit_is_reachable(symbol_map, player, exit_pos)]
+            fallback = [exit_pos for exit_pos in exits if _boundary_side(exit_pos) not in blocked_sides]
+            if not fallback:
+                fallback = list(exits)
+            reachable = [exit_pos for exit_pos in fallback if self._exit_is_reachable(symbol_map, player, exit_pos)]
         if reachable:
             return min(reachable, key=lambda pos: self._exit_choice_priority(pos, player, symbol_map, prefer_unvisited))
         return min(candidates, key=lambda pos: self._exit_choice_priority(pos, player, symbol_map, prefer_unvisited))
@@ -440,6 +452,23 @@ class TaskAgent:
             return
         self._used_exit_sides_by_room.setdefault(signature, set()).add(side)
 
+    def _record_blocked_exit_feedback(self, symbol_map, inventory: dict, player: GridPos) -> None:
+        if _inventory_key_count(inventory) > 0:
+            self._blocked_exit_sides_by_room.clear()
+            return
+        if self.last_reward > -0.05 or self._move_action != ACTION_NOOP:
+            return
+        side = _boundary_side(player)
+        if side is None:
+            return
+        exits = set(symbol_map.exits)
+        if not any(_boundary_side(exit_pos) == side for exit_pos in exits):
+            return
+        signature = self._room_exit_signature(exits)
+        if not signature:
+            return
+        self._blocked_exit_sides_by_room.setdefault(signature, set()).add(side)
+
     def _used_exit_sides_for_exits(self, exits: set[GridPos]) -> set[str]:
         signature = set(self._room_exit_signature(exits))
         used: set[str] = set()
@@ -448,6 +477,15 @@ class TaskAgent:
             if known_exits == signature or known_exits.issubset(signature):
                 used.update(sides)
         return used
+
+    def _blocked_exit_sides_for_exits(self, exits: set[GridPos]) -> set[str]:
+        signature = set(self._room_exit_signature(exits))
+        blocked: set[str] = set()
+        for known_signature, sides in self._blocked_exit_sides_by_room.items():
+            known_exits = set(known_signature)
+            if known_exits == signature or known_exits.issubset(signature) or bool(known_exits & signature):
+                blocked.update(sides)
+        return blocked
 
     def _room_exit_signature(self, exits: set[GridPos]) -> tuple[GridPos, ...]:
         return tuple(sorted(exits))
