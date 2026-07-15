@@ -53,9 +53,15 @@ class TaskAgent:
         self._entry_side: str | None = None
         self._switch_stages_pressed: set[tuple[bool, bool]] = set()
         self._opened_chests: set[GridPos] = set()
+        self._confirmed_opened_chests: set[GridPos] = set()
+        self._pending_chest_target: GridPos | None = None
+        self._pending_chest_open: GridPos | None = None
+        self._pending_chest_inventory: tuple[int, int, bool] | None = None
         self._pending_attack_target: GridPos | None = None
         self._pressed_buttons: set[GridPos] = set()
         self._used_exit_sides_by_room: dict[tuple[GridPos, ...], set[str]] = {}
+        self._blocked_exit_sides_by_room: dict[tuple[GridPos, ...], set[str]] = {}
+        self._recent_monster_seen_ticks = 0
 
     def step(self, frame: np.ndarray, inventory: dict) -> int:
         symbol_map = self.vision.observe(frame, reward=self.last_reward)
@@ -65,6 +71,9 @@ class TaskAgent:
         player = symbol_map.player if symbol_map.player is not None else self._last_player
         if player is None or self.state == TaskState.DONE:
             return ACTION_NOOP
+        self._reconcile_pending_chest(symbol_map, inventory)
+        self._reconcile_visible_chests(symbol_map, inventory)
+        self._update_recent_monster_memory(symbol_map)
 
         if symbol_map.player is not None:
             self._last_room_jump = False
@@ -80,10 +89,23 @@ class TaskAgent:
                 self._locked_exit = None
                 self._entry_side = _boundary_side(symbol_map.player)
             self._last_player = symbol_map.player
+        if self.last_reward <= -0.05 and self._move_action != ACTION_NOOP:
+            blocked_action = self._move_action
+            failed_tile = _step(player, blocked_action)
+            recovery = self._recovery_for_failed_move(symbol_map, player, blocked_action)
+            if recovery:
+                self._recovery_actions = recovery
+            elif _in_bounds(failed_tile):
+                self._failed_tiles[failed_tile] = 80
+            self._move_ticks_remaining = 0
+            self._move_action = ACTION_NOOP
+            self._move_start_player = None
+            self._settle_ticks_remaining = 0
         if player in set(symbol_map.buttons):
             self._pressed_buttons.add(player)
         self._apply_exploration_state(symbol_map, inventory)
         self._known_exits.update(symbol_map.exits)
+        self._record_blocked_exit_feedback(symbol_map, inventory, player)
 
         defensive_action = self._defensive_action(symbol_map, inventory, player)
         if defensive_action is not None:
@@ -108,15 +130,21 @@ class TaskAgent:
             and self._move_start_player is not None
             and player != self._move_start_player
         ):
-            if self._settle_ticks_remaining <= 0:
-                self._settle_ticks_remaining = 4
-            self._settle_ticks_remaining -= 1
-            action = self._move_action
-            if self._settle_ticks_remaining <= 0:
+            if _movement_reached_boundary(self._move_action, player):
                 self._move_ticks_remaining = 0
                 self._move_action = ACTION_NOOP
                 self._move_start_player = None
-            return action
+                self._settle_ticks_remaining = 0
+            else:
+                if self._settle_ticks_remaining <= 0:
+                    self._settle_ticks_remaining = 4
+                self._settle_ticks_remaining -= 1
+                action = self._move_action
+                if self._settle_ticks_remaining <= 0:
+                    self._move_ticks_remaining = 0
+                    self._move_action = ACTION_NOOP
+                    self._move_start_player = None
+                return action
 
         # Interactions take priority over continuing a movement plan.
         goal = get_goal(self.state, symbol_map)
@@ -126,11 +154,12 @@ class TaskAgent:
         elif self.state == TaskState.GO_TO_EXIT:
             goal = self._locked_exit_goal(player, goal, symbol_map)
         visible_or_known_exits = set(symbol_map.exits) | self._known_exits
-        if goal in visible_or_known_exits and self._player_on_exit_segment(player, visible_or_known_exits):
+        goal_exit_component = _exit_component(visible_or_known_exits, goal) if goal in visible_or_known_exits else set()
+        if goal in visible_or_known_exits and self._player_on_exit_segment(player, goal_exit_component):
             self._move_ticks_remaining = 0
             self._move_action = ACTION_NOOP
             self._move_start_player = None
-            self._mark_exit_used(player, visible_or_known_exits)
+            self._mark_exit_used(player, goal_exit_component)
             return _outward_action(player)
         should_press_switch = self._should_press_switch(symbol_map, inventory)
         if should_press_switch and goal in set(symbol_map.switches) and _manhattan(player, goal) == 1:
@@ -138,12 +167,15 @@ class TaskAgent:
             self._move_ticks_remaining = 0
             self._interaction_cooldown = 4
             return ACTION_A
-        should_open_chest = self.state in {TaskState.GET_KEY, TaskState.OPEN_CHEST}
-        if should_open_chest and goal in self._available_chests(symbol_map) and _manhattan(player, goal) == 1:
-            self._opened_chests.add(goal)
+        suspected_chests = set(self._suspected_revealed_chests(symbol_map, inventory))
+        should_open_chest = self.state in {TaskState.GET_KEY, TaskState.OPEN_CHEST} or goal in suspected_chests
+        chest_targets = set(self._available_chests(symbol_map)) | suspected_chests
+        if should_open_chest and goal in chest_targets and _manhattan(player, goal) == 1:
             self._move_ticks_remaining = 0
-            self._interaction_cooldown = 2
-            return ACTION_A
+            self._move_action = ACTION_NOOP
+            self._move_start_player = None
+            self._recovery_actions = []
+            return self._face_then_open_chest(player, goal, inventory)
         interaction = self._interaction_action(
             symbol_map,
             inventory,
@@ -155,6 +187,7 @@ class TaskAgent:
             self._move_ticks_remaining = 0
             return interaction
 
+        self._pending_chest_target = None
         if self._interaction_cooldown > 0:
             self._interaction_cooldown -= 1
             return ACTION_NOOP
@@ -226,9 +259,15 @@ class TaskAgent:
         self._entry_side = None
         self._switch_stages_pressed = set()
         self._opened_chests = set()
+        self._confirmed_opened_chests = set()
+        self._pending_chest_target = None
+        self._pending_chest_open = None
+        self._pending_chest_inventory = None
         self._pending_attack_target = None
         self._pressed_buttons = set()
         self._used_exit_sides_by_room = {}
+        self._blocked_exit_sides_by_room = {}
+        self._recent_monster_seen_ticks = 0
 
     def _interaction_action(
         self,
@@ -251,7 +290,10 @@ class TaskAgent:
         for target in targets:
             if _manhattan(player, target) <= 1:
                 if target in self._available_chests(symbol_map):
-                    self._opened_chests.add(target)
+                    self._move_action = ACTION_NOOP
+                    self._move_start_player = None
+                    self._recovery_actions = []
+                    return self._face_then_open_chest(player, target, inventory)
                 if target in set(symbol_map.switches):
                     self._record_switch_press(inventory)
                 self._interaction_cooldown = 2
@@ -262,6 +304,64 @@ class TaskAgent:
             if _manhattan(player, monster) <= 1:
                 return self._face_then_attack(player, monster, inventory)
         return None
+
+    def _face_then_open_chest(self, player: GridPos, target: GridPos, inventory: dict) -> int:
+        face_action = _action_between(player, target)
+        if self._pending_chest_target == target:
+            self._pending_chest_target = None
+            self._pending_chest_open = target
+            self._pending_chest_inventory = _inventory_open_signature(inventory)
+            self._interaction_cooldown = 2
+            return ACTION_A
+        self._pending_chest_target = target
+        return face_action if face_action != ACTION_NOOP else ACTION_A
+
+    def _reconcile_pending_chest(self, symbol_map, inventory: dict) -> None:
+        if self._pending_chest_open is None:
+            return
+        target = self._pending_chest_open
+        before = self._pending_chest_inventory
+        after = _inventory_open_signature(inventory)
+        inventory_gain = before is not None and (
+            after[0] > before[0]
+            or after[1] > before[1]
+            or (after[2] and not before[2])
+        )
+        opened_by_feedback = (
+            self.last_reward > 0.5
+            or inventory_gain
+            or target not in set(symbol_map.chests)
+        )
+        if opened_by_feedback:
+            self._opened_chests.add(target)
+        if inventory_gain:
+            self._confirmed_opened_chests.add(target)
+        self._pending_chest_open = None
+        self._pending_chest_inventory = None
+
+    def _reconcile_visible_chests(self, symbol_map, inventory: dict) -> None:
+        visible_chests = set(symbol_map.chests)
+        if not visible_chests:
+            return
+        reward_chest_revealed = self._guardian_reward_chest_context(symbol_map, inventory)
+        reused_after_guardian = (
+            reward_chest_revealed
+            and (self._recent_monster_seen_ticks > 0 or reward_chest_revealed)
+            and not symbol_map.monsters
+            and bool(visible_chests & self._opened_chests)
+        )
+        if reused_after_guardian:
+            self._opened_chests.difference_update(visible_chests)
+            return
+        if self.state != TaskState.GET_KEY or _inventory_key_count(inventory) > 0:
+            return
+        self._opened_chests.difference_update(visible_chests - self._confirmed_opened_chests)
+
+    def _update_recent_monster_memory(self, symbol_map) -> None:
+        if symbol_map.monsters:
+            self._recent_monster_seen_ticks = 12
+        elif self._recent_monster_seen_ticks > 0:
+            self._recent_monster_seen_ticks -= 1
 
     def _defensive_action(self, symbol_map, inventory: dict, player: GridPos) -> int | None:
         if not symbol_map.monsters:
@@ -293,11 +393,7 @@ class TaskAgent:
         if self._available_chests(symbol_map):
             self.state = TaskState.GET_KEY
             return
-        if (
-            self.state == TaskState.KILL_GUARDIAN
-            and symbol_map.monsters
-            and _has_inventory_item(inventory, "sword", "has_sword")
-        ):
+        if symbol_map.monsters and _has_inventory_item(inventory, "sword", "has_sword"):
             self.state = TaskState.KILL_GUARDIAN
             return
         if _inventory_key_count(inventory) > 0:
@@ -314,6 +410,11 @@ class TaskAgent:
             return button_goal
         if self._should_press_switch(symbol_map, inventory):
             return min(symbol_map.switches, key=lambda pos: _manhattan(player, pos))
+        if self.state == TaskState.KILL_GUARDIAN and symbol_map.monsters and _has_inventory_item(inventory, "sword", "has_sword"):
+            return min(symbol_map.monsters, key=lambda pos: _manhattan(player, pos))
+        suspected_chests = self._suspected_revealed_chests(symbol_map, inventory)
+        if suspected_chests:
+            return min(suspected_chests, key=lambda pos: self._suspected_chest_priority(symbol_map, player, pos))
         key_count = _inventory_key_count(inventory)
         if key_count > 0:
             if self._entry_side is not None and symbol_map.exits:
@@ -322,18 +423,39 @@ class TaskAgent:
                 return None
             return self._choose_room_exit(symbol_map, player, prefer_unvisited=True)
         if not symbol_map.exits:
-            if self.state == TaskState.KILL_GUARDIAN and symbol_map.monsters and _has_inventory_item(inventory, "sword", "has_sword"):
-                return min(symbol_map.monsters, key=lambda pos: _manhattan(player, pos))
             return None
         exit_goal = self._choose_room_exit(symbol_map, player)
         if exit_goal is not None:
             return exit_goal
-        if self.state == TaskState.KILL_GUARDIAN and symbol_map.monsters and _has_inventory_item(inventory, "sword", "has_sword"):
-            return min(symbol_map.monsters, key=lambda pos: _manhattan(player, pos))
         return None
 
     def _available_chests(self, symbol_map) -> tuple[GridPos, ...]:
         return tuple(chest for chest in symbol_map.chests if chest not in self._opened_chests)
+
+    def _suspected_revealed_chests(self, symbol_map, inventory: dict) -> tuple[GridPos, ...]:
+        if symbol_map.chests or symbol_map.monsters:
+            return ()
+        if not self._guardian_reward_chest_context(symbol_map, inventory):
+            return ()
+        return tuple(sorted(pos for pos in self._opened_chests if _in_bounds(pos)))
+
+    def _guardian_reward_chest_context(self, symbol_map, inventory: dict) -> bool:
+        return (
+            len(symbol_map.exits) >= 3
+            and len(self._opened_chests) >= 2
+            and _has_inventory_item(inventory, "sword", "has_sword")
+            and _inventory_gold_count(inventory) > 0
+            and not symbol_map.monsters
+        )
+
+    def _suspected_chest_priority(self, symbol_map, player: GridPos, target: GridPos) -> tuple[int, int]:
+        adjacent = self._adjacent_goal(symbol_map, target)
+        if adjacent is None:
+            return (999, _manhattan(player, target))
+        if adjacent == player:
+            return (0, _manhattan(player, target))
+        actions = plan_path(symbol_map, player, adjacent)
+        return (len(actions) if actions else 999, _manhattan(player, target))
 
     def _choose_room_exit(self, symbol_map, player: GridPos, *, prefer_unvisited: bool = False) -> GridPos | None:
         exits = tuple(symbol_map.exits)
@@ -347,9 +469,17 @@ class TaskAgent:
             candidates = [exit_pos for exit_pos in exits if _boundary_side(exit_pos) != self._entry_side]
             if not candidates:
                 candidates = list(exits)
+        blocked_sides = self._blocked_exit_sides_for_exits(set(exits))
+        if blocked_sides:
+            unblocked = [exit_pos for exit_pos in candidates if _boundary_side(exit_pos) not in blocked_sides]
+            if unblocked:
+                candidates = unblocked
         reachable = [exit_pos for exit_pos in candidates if self._exit_is_reachable(symbol_map, player, exit_pos)]
         if not reachable and excluded_entry_side:
-            reachable = [exit_pos for exit_pos in exits if self._exit_is_reachable(symbol_map, player, exit_pos)]
+            fallback = [exit_pos for exit_pos in exits if _boundary_side(exit_pos) not in blocked_sides]
+            if not fallback:
+                fallback = list(exits)
+            reachable = [exit_pos for exit_pos in fallback if self._exit_is_reachable(symbol_map, player, exit_pos)]
         if reachable:
             return min(reachable, key=lambda pos: self._exit_choice_priority(pos, player, symbol_map, prefer_unvisited))
         return min(candidates, key=lambda pos: self._exit_choice_priority(pos, player, symbol_map, prefer_unvisited))
@@ -379,6 +509,23 @@ class TaskAgent:
             return
         self._used_exit_sides_by_room.setdefault(signature, set()).add(side)
 
+    def _record_blocked_exit_feedback(self, symbol_map, inventory: dict, player: GridPos) -> None:
+        if _inventory_key_count(inventory) > 0:
+            self._blocked_exit_sides_by_room.clear()
+            return
+        if self.last_reward > -0.05 or self._move_action != ACTION_NOOP:
+            return
+        side = _boundary_side(player)
+        if side is None:
+            return
+        exits = set(symbol_map.exits)
+        if not any(_boundary_side(exit_pos) == side for exit_pos in exits):
+            return
+        signature = self._room_exit_signature(exits)
+        if not signature:
+            return
+        self._blocked_exit_sides_by_room.setdefault(signature, set()).add(side)
+
     def _used_exit_sides_for_exits(self, exits: set[GridPos]) -> set[str]:
         signature = set(self._room_exit_signature(exits))
         used: set[str] = set()
@@ -387,6 +534,15 @@ class TaskAgent:
             if known_exits == signature or known_exits.issubset(signature):
                 used.update(sides)
         return used
+
+    def _blocked_exit_sides_for_exits(self, exits: set[GridPos]) -> set[str]:
+        signature = set(self._room_exit_signature(exits))
+        blocked: set[str] = set()
+        for known_signature, sides in self._blocked_exit_sides_by_room.items():
+            known_exits = set(known_signature)
+            if known_exits == signature or known_exits.issubset(signature) or bool(known_exits & signature):
+                blocked.update(sides)
+        return blocked
 
     def _room_exit_signature(self, exits: set[GridPos]) -> tuple[GridPos, ...]:
         return tuple(sorted(exits))
@@ -426,17 +582,12 @@ class TaskAgent:
     def _exit_is_reachable(self, symbol_map, player: GridPos, exit_pos: GridPos) -> bool:
         if self._player_on_exit_segment(player, {exit_pos}):
             return True
-        approach = _inside_exit_approach(exit_pos)
-        if approach is not None:
-            if not _in_bounds(approach):
-                return False
-            if approach in set(symbol_map.blocked_tiles()):
-                return False
-            if approach in set(symbol_map.danger_tiles()):
-                return False
-            if player == approach:
+        for approach in self._exit_approaches(symbol_map, exit_pos):
+            if player == approach or plan_path(symbol_map, player, approach):
                 return True
-            return bool(plan_path(symbol_map, player, approach))
+        for exit_tile in _exit_component(set(symbol_map.exits) | {exit_pos}, exit_pos):
+            if player == exit_tile or plan_path(symbol_map, player, exit_tile):
+                return True
         return bool(plan_path(symbol_map, player, exit_pos))
 
     def _needs_adjacent_planning(self, symbol_map, goal: GridPos) -> bool:
@@ -444,6 +595,7 @@ class TaskAgent:
             set(symbol_map.chests)
             | set(symbol_map.monsters)
             | set(symbol_map.switches)
+            | set(self._opened_chests)
         )
         return goal in interactive_targets
 
@@ -459,15 +611,6 @@ class TaskAgent:
     def _player_on_exit_segment(self, player: GridPos, exits: set[GridPos]) -> bool:
         if player in exits:
             return True
-        if not exits:
-            return False
-        x, y = player
-        if y in (0, GRID_HEIGHT - 1):
-            xs = [ex for ex, ey in exits if ey == y]
-            return bool(xs) and min(xs) <= x <= max(xs)
-        if x in (0, GRID_WIDTH - 1):
-            ys = [ey for ex, ey in exits if ex == x]
-            return bool(ys) and min(ys) <= y <= max(ys)
         return False
 
     def _adjacent_goal(self, symbol_map, target: GridPos) -> GridPos | None:
@@ -552,22 +695,70 @@ class TaskAgent:
         for danger in set(symbol_map.danger_tiles()):
             if _in_bounds(danger) and danger not in {start, goal}:
                 occupancy[danger[1], danger[0]] = 1
+        for failed in self._failed_tiles:
+            if _in_bounds(failed) and failed not in {start, goal}:
+                occupancy[failed[1], failed[0]] = 1
         occupancy[start[1], start[0]] = 0
         occupancy[goal[1], goal[0]] = 0
 
+        approaches = self._exit_approaches(symbol_map, goal)
+        if approaches:
+            for approach in approaches:
+                occupancy[approach[1], approach[0]] = 0
+            if start in approaches:
+                return [_outward_action(goal)]
+            best_path: list[GridPos] = []
+            for approach in sorted(approaches, key=lambda pos: _manhattan(start, pos)):
+                path = a_star(occupancy, start, approach)
+                if path and (not best_path or len(path) < len(best_path)):
+                    best_path = path
+            if best_path:
+                return path_to_actions([start, *best_path])
+
+        exit_component = _exit_component(set(symbol_map.exits) | {goal}, goal)
+        for exit_tile in exit_component:
+            if _in_bounds(exit_tile):
+                occupancy[exit_tile[1], exit_tile[0]] = 0
+        if start in exit_component:
+            return [_outward_action(start)]
+        best_exit_path: list[GridPos] = []
+        for exit_tile in sorted(exit_component, key=lambda pos: _manhattan(start, pos)):
+            if not _in_bounds(exit_tile):
+                continue
+            path = a_star(occupancy, start, exit_tile)
+            if path and (not best_exit_path or len(path) < len(best_exit_path)):
+                best_exit_path = path
+        if best_exit_path:
+            return path_to_actions([start, *best_exit_path])
+
         approach = _inside_exit_approach(goal)
         if approach is not None and _in_bounds(approach):
-            if occupancy[approach[1], approach[0]] != 0:
-                path = a_star(occupancy, start, goal)
-                return path_to_actions([start, *path]) if path else []
             if start == approach:
-                return [_action_between(start, goal)]
+                return [_outward_action(goal)]
             path_to_approach = a_star(occupancy, start, approach)
             if path_to_approach:
-                return path_to_actions([start, *path_to_approach, goal])
+                return path_to_actions([start, *path_to_approach])
 
         path = a_star(occupancy, start, goal)
         return path_to_actions([start, *path]) if path else []
+
+    def _exit_approaches(self, symbol_map, goal: GridPos) -> tuple[GridPos, ...]:
+        exits = set(symbol_map.exits)
+        if goal not in exits:
+            exits.add(goal)
+        component = _exit_component(exits, goal)
+        blocked = set(symbol_map.blocked_tiles())
+        danger = set(symbol_map.danger_tiles())
+        approaches: list[GridPos] = []
+        for exit_pos in sorted(component):
+            approach = _inside_exit_approach(exit_pos)
+            if approach is None or not _in_bounds(approach):
+                continue
+            if approach in blocked or approach in danger:
+                continue
+            if approach not in approaches:
+                approaches.append(approach)
+        return tuple(approaches)
 
     def _recovery_for_failed_move(self, symbol_map, player: GridPos, action: int) -> list[int]:
         failed_tile = _step(player, action)
@@ -575,33 +766,59 @@ class TaskAgent:
             return []
 
         blocked = set(symbol_map.blocked_tiles()) | set(symbol_map.monsters)
-        nudge_action = ACTION_NOOP
+        exit_tiles = set(symbol_map.exits) | self._known_exits
+        if self.state == TaskState.GO_TO_EXIT:
+            exit_outward = _nearby_exit_outward_action(failed_tile, exit_tiles, action)
+            if exit_outward != ACTION_NOOP:
+                nudge_ticks = max(6, TILE_SIZE // 2)
+                retry_ticks = TILE_SIZE
+                return [exit_outward] * nudge_ticks + [action] * retry_ticks
+
+        nudge_actions: list[int] = []
         if action in (ACTION_UP, ACTION_DOWN):
             left_side = (failed_tile[0] - 1, failed_tile[1])
             right_side = (failed_tile[0] + 1, failed_tile[1])
             left_blocked = (not _in_bounds(left_side)) or left_side in blocked
             right_blocked = (not _in_bounds(right_side)) or right_side in blocked
             if left_blocked and not right_blocked:
-                nudge_action = ACTION_RIGHT
+                nudge_actions = [ACTION_RIGHT, ACTION_LEFT]
             elif right_blocked and not left_blocked:
-                nudge_action = ACTION_LEFT
+                nudge_actions = [ACTION_LEFT, ACTION_RIGHT]
             else:
-                nudge_action = ACTION_RIGHT if _can_step(player, ACTION_RIGHT, blocked) else ACTION_LEFT
+                nudge_actions = [ACTION_RIGHT, ACTION_LEFT]
         elif action in (ACTION_LEFT, ACTION_RIGHT):
             upper_side = (failed_tile[0], failed_tile[1] - 1)
             lower_side = (failed_tile[0], failed_tile[1] + 1)
             upper_blocked = (not _in_bounds(upper_side)) or upper_side in blocked
             lower_blocked = (not _in_bounds(lower_side)) or lower_side in blocked
             if upper_blocked and not lower_blocked:
-                nudge_action = ACTION_DOWN
+                nudge_actions = [ACTION_DOWN, ACTION_UP]
             elif lower_blocked and not upper_blocked:
-                nudge_action = ACTION_UP
+                nudge_actions = [ACTION_UP, ACTION_DOWN]
             else:
-                nudge_action = ACTION_DOWN if _can_step(player, ACTION_DOWN, blocked) else ACTION_UP
+                nudge_actions = [ACTION_DOWN, ACTION_UP]
 
-        if nudge_action == ACTION_NOOP or not _can_step(player, nudge_action, blocked):
+        nudge_action = ACTION_NOOP
+        allow_blocked_micro_nudge = False
+        if nudge_actions:
+            first_choice = nudge_actions[0]
+            if _can_step(player, first_choice, blocked):
+                nudge_action = first_choice
+            else:
+                # A blocked neighbouring tile can still allow a few pixels of
+                # in-tile correction. This is exactly the corner-clip case near
+                # chests/walls: crossing a full tile is illegal, but nudging
+                # away from the clipping edge can make the retry pass.
+                nudge_action = first_choice
+                allow_blocked_micro_nudge = True
+        if nudge_action == ACTION_NOOP and len(nudge_actions) > 1:
+            nudge_action = next(
+                (candidate for candidate in nudge_actions[1:] if _can_step(player, candidate, blocked)),
+                ACTION_NOOP,
+            )
+        if nudge_action == ACTION_NOOP:
             return []
-        nudge_ticks = max(4, TILE_SIZE // 3)
+        nudge_ticks = max(3, TILE_SIZE // 4) if allow_blocked_micro_nudge else max(4, TILE_SIZE // 3)
         retry_ticks = TILE_SIZE
         return [nudge_action] * nudge_ticks + [action] * retry_ticks
 
@@ -655,7 +872,7 @@ def get_action_mask(symbol_map, inventory: dict | None = None) -> list[bool]:
     if player is None:
         return [True, False, False, False, False, False, False]
 
-    blocked = set(symbol_map.blocked_tiles()) | set(symbol_map.danger_tiles())
+    blocked = set(symbol_map.blocked_tiles())
     for action, (dx, dy) in _ACTION_TO_DELTA.items():
         nxt = (player[0] + dx, player[1] + dy)
         if not _in_bounds(nxt) or nxt in blocked:
@@ -742,6 +959,26 @@ def _inventory_key_count(inventory: dict) -> int:
     return 0
 
 
+def _inventory_gold_count(inventory: dict) -> int:
+    for name in ("gold", "coins", "coin"):
+        value = inventory.get(name)
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return 0
+
+
+def _inventory_open_signature(inventory: dict) -> tuple[int, int, bool]:
+    return (
+        _inventory_key_count(inventory),
+        _inventory_gold_count(inventory),
+        _has_inventory_item(inventory, "sword", "has_sword"),
+    )
+
+
 def _player_on_exit(symbol_map) -> bool:
     return symbol_map.player is not None and symbol_map.player in set(symbol_map.exits)
 
@@ -785,6 +1022,57 @@ def _inside_exit_approach(exit_pos: GridPos) -> GridPos | None:
     if x == GRID_WIDTH - 1:
         return (GRID_WIDTH - 2, y)
     return None
+
+
+def _movement_reached_boundary(action: int, pos: GridPos) -> bool:
+    x, y = pos
+    return (
+        (action == ACTION_UP and y == 0)
+        or (action == ACTION_DOWN and y == GRID_HEIGHT - 1)
+        or (action == ACTION_LEFT and x == 0)
+        or (action == ACTION_RIGHT and x == GRID_WIDTH - 1)
+    )
+
+
+def _nearby_exit_outward_action(failed_tile: GridPos, exits: set[GridPos], action: int) -> int:
+    if action in (ACTION_LEFT, ACTION_RIGHT):
+        if failed_tile in exits:
+            outward = _outward_action(failed_tile)
+            return outward if outward in (ACTION_UP, ACTION_DOWN) else ACTION_NOOP
+        for exit_tile in exits:
+            outward = _outward_action(exit_tile)
+            if outward == ACTION_UP and failed_tile == (exit_tile[0], exit_tile[1] + 1):
+                return ACTION_UP
+            if outward == ACTION_DOWN and failed_tile == (exit_tile[0], exit_tile[1] - 1):
+                return ACTION_DOWN
+    if action in (ACTION_UP, ACTION_DOWN):
+        if failed_tile in exits:
+            outward = _outward_action(failed_tile)
+            return outward if outward in (ACTION_LEFT, ACTION_RIGHT) else ACTION_NOOP
+        for exit_tile in exits:
+            outward = _outward_action(exit_tile)
+            if outward == ACTION_LEFT and failed_tile == (exit_tile[0] + 1, exit_tile[1]):
+                return ACTION_LEFT
+            if outward == ACTION_RIGHT and failed_tile == (exit_tile[0] - 1, exit_tile[1]):
+                return ACTION_RIGHT
+    return ACTION_NOOP
+
+
+def _exit_component(exits: set[GridPos], origin: GridPos) -> set[GridPos]:
+    if origin not in exits:
+        return {origin}
+    component: set[GridPos] = set()
+    frontier = [origin]
+    while frontier:
+        current = frontier.pop()
+        if current in component:
+            continue
+        component.add(current)
+        for dx, dy in _ACTION_TO_DELTA.values():
+            nxt = (current[0] + dx, current[1] + dy)
+            if nxt in exits and nxt not in component:
+                frontier.append(nxt)
+    return component
 
 
 def _action_between(start: GridPos, goal: GridPos) -> int:
